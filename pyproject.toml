@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ingestion-airflow"
+version = "0.1.0"
+description = "Airflow runtime for ingestion-core hash-diff pipelines"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "Data Platform Team" }
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest==8.3.4"
+]
+
+[tool.setuptools]
+packages = ["ingestion_airflow"]

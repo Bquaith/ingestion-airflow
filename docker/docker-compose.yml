@@ -1,0 +1,60 @@
+x-airflow-common: &airflow-common
+  build:
+    context: ../..
+    dockerfile: ingestion-airflow/docker/Dockerfile.airflow
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+    AIRFLOW__CORE__FERNET_KEY: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+    AIRFLOW__WEBSERVER__SHOW_TRIGGER_FORM_IF_NO_PARAMS: "True"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_METADATA_DSN:-postgresql+psycopg2://postgres:postgres@host.docker.internal:5432/target_db}
+    PYTHONPATH: /opt/airflow
+    CONTRACTS_SERVICE_URL: ${CONTRACTS_SERVICE_URL:-http://host.docker.internal:8081}
+  user: "${AIRFLOW_UID:-50000}:0"
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  volumes:
+    - ../dags:/opt/airflow/dags
+    - ../ingestion_airflow:/opt/airflow/ingestion_airflow
+    - airflow_logs:/opt/airflow/logs
+
+services:
+  airflow-init:
+    <<: *airflow-common
+    container_name: ingestion-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username airflow \
+          --password airflow \
+          --firstname Airflow \
+          --lastname Admin \
+          --role Admin \
+          --email airflow@example.com || true
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: ingestion-airflow-webserver
+    command: webserver
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "8088:8080"
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: ingestion-airflow-scheduler
+    command: scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  airflow_logs:
