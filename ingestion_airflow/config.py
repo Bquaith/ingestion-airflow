@@ -8,6 +8,7 @@ from typing import Any, Mapping
 @dataclass(frozen=True)
 class IngestionRunConfig:
     contracts_service_url: str
+    audit_dsn: str
     namespace: str
     name: str
     contract_version: str | None
@@ -36,9 +37,12 @@ class IngestionRunConfig:
         contracts_service_url = conf.get("contracts_service_url") or os.getenv("CONTRACTS_SERVICE_URL")
         if not contracts_service_url:
             missing.append("contracts_service_url")
+        audit_dsn = os.getenv("AUDIT_DATABASE_DSN")
+        if not audit_dsn:
+            missing.append("AUDIT_DATABASE_DSN")
         if missing:
             joined = ", ".join(sorted(missing))
-            raise ValueError(f"Missing required dagrun.conf keys: {joined}")
+            raise ValueError(f"Missing required configuration values: {joined}")
 
         contract_version = conf.get("contract_version")
         if contract_version is not None:
@@ -57,6 +61,7 @@ class IngestionRunConfig:
 
         return cls(
             contracts_service_url=str(contracts_service_url),
+            audit_dsn=str(audit_dsn),
             namespace=str(conf["namespace"]),
             name=str(conf["name"]),
             contract_version=contract_version,

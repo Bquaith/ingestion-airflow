@@ -21,27 +21,6 @@ integration-platform/
 
 Docker image для Airflow собирается из `ingestion-airflow`, но во время build копирует sibling-репозиторий `ingestion-core` и устанавливает его как Python package.
 
-## Структура
-
-```text
-ingestion-airflow/
-  dags/
-    ingest_contract_hashdiff.py
-  docker/
-    Dockerfile.airflow
-    docker-compose.yml
-    requirements.txt
-  ingestion_airflow/
-    __init__.py
-    config.py
-  tests/
-    test_config.py
-  pyproject.toml
-  requirements-airflow.txt
-  requirements-test.txt
-  tox.ini
-```
-
 ## Запуск Docker Compose
 
 ```bash

@@ -11,6 +11,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_METADATA_DSN:-postgresql+psycopg2://postgres:postgres@host.docker.internal:5432/target_db}
     PYTHONPATH: /opt/airflow
     CONTRACTS_SERVICE_URL: ${CONTRACTS_SERVICE_URL:-http://host.docker.internal:8081}
+    AUDIT_DATABASE_DSN: ${AUDIT_DATABASE_DSN:-postgresql+psycopg2://postgres:postgres@host.docker.internal:5432/dag_audit}
   user: "${AIRFLOW_UID:-50000}:0"
   extra_hosts:
     - "host.docker.internal:host-gateway"
@@ -28,6 +29,7 @@ services:
       - -c
       - |
         airflow db migrate
+        python -m ingestion_airflow.db.migrations --database-url "$${AUDIT_DATABASE_DSN}" upgrade
         airflow users create \
           --username airflow \
           --password airflow \

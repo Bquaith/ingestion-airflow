@@ -7,9 +7,8 @@ from airflow.operators.python import get_current_context
 from airflow.utils.trigger_rule import TriggerRule
 
 from ingestion_airflow.config import IngestionRunConfig
-from ingestion_core.audit import (
+from ingestion_airflow.db.audit import (
     acquire_pipeline_lock,
-    ensure_audit_tables,
     finalize_pipeline_state,
     finish_run_audit,
     persist_pipeline_checkpoint,
@@ -51,11 +50,10 @@ def ingest_contract_hashdiff() -> None:
     def run_hashdiff(contract_payload: dict) -> dict:
         config = _load_run_config()
 
-        target_engine = create_sqlalchemy_engine(config.target_dsn)
-        ensure_audit_tables(target_engine)
+        audit_engine = create_sqlalchemy_engine(config.audit_dsn)
 
         run_id = start_run_audit(
-            engine=target_engine,
+            engine=audit_engine,
             pipeline_id=config.pipeline_id,
             contract_id=str(contract_payload.get("contract_id", "unknown-contract")),
             version=str(contract_payload.get("version", "unknown-version")),
@@ -65,7 +63,7 @@ def ingest_contract_hashdiff() -> None:
 
         try:
             lock_acquired = acquire_pipeline_lock(
-                engine=target_engine,
+                engine=audit_engine,
                 pipeline_id=config.pipeline_id,
                 run_id=run_id,
             )
@@ -87,7 +85,7 @@ def ingest_contract_hashdiff() -> None:
             )
 
             finish_run_audit(
-                engine=target_engine,
+                engine=audit_engine,
                 run_id=run_id,
                 status="success",
                 read_count=result.read_count,
@@ -98,7 +96,7 @@ def ingest_contract_hashdiff() -> None:
                 error_text=None,
             )
             persist_pipeline_checkpoint(
-                engine=target_engine,
+                engine=audit_engine,
                 pipeline_id=config.pipeline_id,
                 run_id=run_id,
                 checkpoint_payload={
@@ -130,7 +128,7 @@ def ingest_contract_hashdiff() -> None:
             }
         except Exception as exc:
             finish_run_audit(
-                engine=target_engine,
+                engine=audit_engine,
                 run_id=run_id,
                 status="failed",
                 read_count=0,
@@ -144,22 +142,21 @@ def ingest_contract_hashdiff() -> None:
         finally:
             if lock_acquired:
                 release_pipeline_lock(
-                    engine=target_engine,
+                    engine=audit_engine,
                     pipeline_id=config.pipeline_id,
                     run_id=run_id,
                 )
-            target_engine.dispose()
+            audit_engine.dispose()
 
     @task(trigger_rule=TriggerRule.ALL_DONE)
     def finalize_audit() -> None:
         config = _load_run_config()
 
-        target_engine = create_sqlalchemy_engine(config.target_dsn)
+        audit_engine = create_sqlalchemy_engine(config.audit_dsn)
         try:
-            ensure_audit_tables(target_engine)
-            finalize_pipeline_state(target_engine, config.pipeline_id)
+            finalize_pipeline_state(audit_engine, config.pipeline_id)
         finally:
-            target_engine.dispose()
+            audit_engine.dispose()
 
     contract_payload = fetch_contract()
     hashdiff_task = run_hashdiff(contract_payload)

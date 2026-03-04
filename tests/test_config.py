@@ -5,6 +5,14 @@ import pytest
 from ingestion_airflow.config import IngestionRunConfig
 
 
+@pytest.fixture(autouse=True)
+def _set_audit_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "AUDIT_DATABASE_DSN",
+        "postgresql+psycopg2://audit_user:audit_pass@postgres_audit:5432/audit_db",
+    )
+
+
 def _base_conf() -> dict[str, str]:
     return {
         "contracts_service_url": "http://contracts.local",
@@ -20,6 +28,7 @@ def _base_conf() -> dict[str, str]:
 def test_config_uses_default_batch_sizes() -> None:
     config = IngestionRunConfig.from_dagrun_conf(_base_conf())
 
+    assert config.audit_dsn == "postgresql+psycopg2://audit_user:audit_pass@postgres_audit:5432/audit_db"
     assert config.source_batch_size == 1000
     assert config.upsert_batch_size == 1000
 
@@ -38,3 +47,10 @@ def test_config_validates_batch_size_type() -> None:
 
     with pytest.raises(ValueError, match="must be integers"):
         IngestionRunConfig.from_dagrun_conf(conf)
+
+
+def test_config_requires_audit_database_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AUDIT_DATABASE_DSN")
+
+    with pytest.raises(ValueError, match="AUDIT_DATABASE_DSN"):
+        IngestionRunConfig.from_dagrun_conf(_base_conf())
