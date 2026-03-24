@@ -8,7 +8,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__FERNET_KEY: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
     AIRFLOW__WEBSERVER__SHOW_TRIGGER_FORM_IF_NO_PARAMS: "True"
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_METADATA_DSN:-postgresql+psycopg2://postgres:postgres@host.docker.internal:5432/target_db}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_METADATA_DSN:-postgresql+psycopg2://postgres:postgres@host.docker.internal:5432/data_lake}
     PYTHONPATH: /opt/airflow
     CONTRACTS_SERVICE_URL: ${CONTRACTS_SERVICE_URL:-http://host.docker.internal:8081}
     AUDIT_DATABASE_DSN: ${AUDIT_DATABASE_DSN:-postgresql+psycopg2://postgres:postgres@host.docker.internal:5432/dag_audit}
