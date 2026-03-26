@@ -22,6 +22,7 @@ def _base_conf() -> dict[str, str]:
         "source_table": "public.orders",
         "target_dsn": "postgresql+psycopg2://target_user:target_pass@postgres_target:5432/target_db",
         "target_table_curated": "curated.orders",
+        "landing_s3_bucket": "integration-landing",
     }
 
 
@@ -29,7 +30,10 @@ def test_config_uses_default_batch_sizes() -> None:
     config = IngestionRunConfig.from_dagrun_conf(_base_conf())
 
     assert config.audit_dsn == "postgresql+psycopg2://audit_user:audit_pass@postgres_audit:5432/audit_db"
+    assert config.target_table_raw == "raw.sales__orders"
+    assert config.landing_s3_prefix == "accepted"
     assert config.source_batch_size == 1000
+    assert config.raw_load_batch_size == 1000
     assert config.upsert_batch_size == 1000
 
 
@@ -43,7 +47,7 @@ def test_config_validates_positive_batch_sizes() -> None:
 
 def test_config_validates_batch_size_type() -> None:
     conf = _base_conf()
-    conf["upsert_batch_size"] = "not-int"
+    conf["raw_load_batch_size"] = "not-int"
 
     with pytest.raises(ValueError, match="must be integers"):
         IngestionRunConfig.from_dagrun_conf(conf)
@@ -54,3 +58,21 @@ def test_config_requires_audit_database_dsn(monkeypatch: pytest.MonkeyPatch) -> 
 
     with pytest.raises(ValueError, match="AUDIT_DATABASE_DSN"):
         IngestionRunConfig.from_dagrun_conf(_base_conf())
+
+
+def test_config_requires_landing_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    conf = _base_conf()
+    conf.pop("landing_s3_bucket")
+    monkeypatch.delenv("LANDING_S3_BUCKET", raising=False)
+
+    with pytest.raises(ValueError, match="landing_s3_bucket"):
+        IngestionRunConfig.from_dagrun_conf(conf)
+
+
+def test_config_parses_landing_boolean_override() -> None:
+    conf = _base_conf()
+    conf["landing_s3_verify_ssl"] = "false"
+
+    config = IngestionRunConfig.from_dagrun_conf(conf)
+
+    assert config.landing_s3_verify_ssl is False

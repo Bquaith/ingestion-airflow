@@ -13,6 +13,7 @@ from ingestion_airflow.db.audit_tables import (
     pipeline_lock_table,
     pipeline_state_table,
     run_audit_table,
+    stage_audit_table,
 )
 
 
@@ -112,6 +113,79 @@ def persist_pipeline_checkpoint(
                 "checkpoint_json": dict(checkpoint_payload),
                 "updated_at": func.now(),
             },
+        )
+    )
+
+    with engine.begin() as conn:
+        conn.execute(statement)
+
+
+def read_pipeline_checkpoint(engine: Engine, pipeline_id: str) -> dict[str, Any] | None:
+    statement = select(
+        pipeline_checkpoint_table.c.run_id,
+        pipeline_checkpoint_table.c.checkpoint_json,
+        pipeline_checkpoint_table.c.updated_at,
+    ).where(pipeline_checkpoint_table.c.pipeline_id == pipeline_id)
+
+    with engine.begin() as conn:
+        row = conn.execute(statement).mappings().first()
+        if row is None:
+            return None
+
+    checkpoint = dict(row["checkpoint_json"] or {})
+    checkpoint["run_id"] = str(row["run_id"])
+    checkpoint["updated_at"] = row["updated_at"].isoformat() if row["updated_at"] else None
+    return checkpoint
+
+
+def start_stage_audit(engine: Engine, run_id: str, stage_name: str) -> None:
+    now = datetime.now(timezone.utc)
+    statement = (
+        pg_insert(stage_audit_table)
+        .values(
+            run_id=_parse_run_id(run_id),
+            stage_name=stage_name,
+            status="running",
+            started_at=now,
+            finished_at=None,
+            metrics_json={},
+            error_text=None,
+        )
+        .on_conflict_do_update(
+            index_elements=[stage_audit_table.c.run_id, stage_audit_table.c.stage_name],
+            set_={
+                "status": "running",
+                "started_at": now,
+                "finished_at": None,
+                "metrics_json": {},
+                "error_text": None,
+            },
+        )
+    )
+
+    with engine.begin() as conn:
+        conn.execute(statement)
+
+
+def finish_stage_audit(
+    engine: Engine,
+    run_id: str,
+    stage_name: str,
+    status: str,
+    metrics_json: Mapping[str, Any] | None = None,
+    error_text: str | None = None,
+) -> None:
+    statement = (
+        update(stage_audit_table)
+        .where(
+            stage_audit_table.c.run_id == _parse_run_id(run_id),
+            stage_audit_table.c.stage_name == stage_name,
+        )
+        .values(
+            status=status,
+            finished_at=func.now(),
+            metrics_json=dict(metrics_json or {}),
+            error_text=error_text,
         )
     )
 

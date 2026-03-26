@@ -14,6 +14,7 @@ authors = [
 dependencies = [
   "SQLAlchemy>=1.4.36,<2.0",
   "alembic>=1.13,<2",
+  "boto3==1.36.26",
   "psycopg2-binary==2.9.10"
 ]
 

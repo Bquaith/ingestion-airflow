@@ -40,6 +40,19 @@ run_audit_table = Table(
     schema=AUDIT_SCHEMA,
 )
 
+stage_audit_table = Table(
+    "stage_audit",
+    audit_metadata,
+    Column("run_id", PGUUID(as_uuid=True), primary_key=True),
+    Column("stage_name", Text, primary_key=True),
+    Column("status", Text, nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("finished_at", DateTime(timezone=True)),
+    Column("metrics_json", JSONB),
+    Column("error_text", Text),
+    schema=AUDIT_SCHEMA,
+)
+
 pipeline_lock_table = Table(
     "pipeline_lock",
     audit_metadata,

@@ -1,0 +1,19 @@
+{
+  "contracts_service_url": "http://host.docker.internal:8000",
+  "namespace": "sales",
+  "name": "orders",
+  "contract_version": "1.0.0",
+  "source_dsn": "postgresql+psycopg2://postgres:postgres@host.docker.internal:5432/test_data_set",
+  "source_table": "public.orders",
+  "target_dsn": "postgresql+psycopg2://postgres:postgres@host.docker.internal:5432/data_lake",
+  "target_table_raw": "raw.sales__orders",
+  "target_table_curated": "curated.orders",
+  "landing_s3_bucket": "ingestion-landing",
+  "landing_s3_prefix": "accepted",
+  "landing_s3_endpoint_url": "http://host.docker.internal:9000",
+  "landing_s3_region": "us-east-1",
+  "landing_s3_verify_ssl": false,
+  "source_batch_size": 1000,
+  "raw_load_batch_size": 1000,
+  "upsert_batch_size": 1000
+}

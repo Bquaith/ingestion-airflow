@@ -10,8 +10,21 @@ x-airflow-common: &airflow-common
     AIRFLOW__WEBSERVER__SHOW_TRIGGER_FORM_IF_NO_PARAMS: "True"
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_METADATA_DSN:-postgresql+psycopg2://postgres:postgres@host.docker.internal:5432/data_lake}
     PYTHONPATH: /opt/airflow
-    CONTRACTS_SERVICE_URL: ${CONTRACTS_SERVICE_URL:-http://host.docker.internal:8081}
+    CONTRACTS_SERVICE_URL: ${CONTRACTS_SERVICE_URL:-http://host.docker.internal:8000}
     AUDIT_DATABASE_DSN: ${AUDIT_DATABASE_DSN:-postgresql+psycopg2://postgres:postgres@host.docker.internal:5432/dag_audit}
+    LANDING_S3_BUCKET: ${LANDING_S3_BUCKET:-ingestion-landing}
+    LANDING_S3_PREFIX: ${LANDING_S3_PREFIX:-accepted}
+    LANDING_S3_ENDPOINT_URL: ${LANDING_S3_ENDPOINT_URL:-http://host.docker.internal:9000}
+    LANDING_S3_REGION: ${LANDING_S3_REGION:-us-east-1}
+    LANDING_S3_VERIFY_SSL: ${LANDING_S3_VERIFY_SSL:-false}
+    KEYCLOAK_TOKEN_URL: ${KEYCLOAK_TOKEN_URL:-http://host.docker.internal:8081/realms/vkr/protocol/openid-connect/token}
+    KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-airflow-minio-sts}
+    KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-airflow-minio-sts-secret}
+    MINIO_STS_ENDPOINT: ${MINIO_STS_ENDPOINT:-http://host.docker.internal:9000}
+    MINIO_STS_DURATION_SECONDS: ${MINIO_STS_DURATION_SECONDS:-3600}
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
   user: "${AIRFLOW_UID:-50000}:0"
   extra_hosts:
     - "host.docker.internal:host-gateway"
