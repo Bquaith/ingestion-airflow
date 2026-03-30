@@ -1,13 +1,14 @@
 # ingestion-airflow
 
-Airflow runtime-репозиторий для запуска DAG `ingest_contract_hashdiff` поверх пакета `ingestion-core`.
+Airflow runtime-репозиторий для запуска DAG-ов для инкрементальной закрзки данных в озеро данных.
 
 Репозиторий содержит:
-- универсальный DAG `dags/ingest_contract_hashdiff.py`
+- основной DAG `dags/ingest_contract_hashdiff.py`
+- replay DAG `dags/replay_contract_hashdiff_from_minio.py`
 - runtime-конфиг для чтения `dagrun.conf`
 - Docker Compose для локального запуска Airflow
 
-DAG `ingest_contract_hashdiff` реализует staged hash-diff pipeline:
+DAG `ingest_contract_hashdiff` реализует hash-diff pipeline:
 
 ```text
 fetch_contract
@@ -20,6 +21,18 @@ fetch_contract
   -> merge_curated
   -> persist_checkpoint
   -> finalize_run
+```
+
+DAG `replay_contract_hashdiff_from_minio` переигрывает загрузку от уже сохраненного
+`accepted_snapshot` в MinIO/S3:
+
+```text
+resolve_replay_input
+  -> fetch_contract
+  -> start_replay_run
+  -> load_raw_replay
+  -> merge_curated_replay
+  -> finalize_replay
 ```
 
 Бизнес-логика hash-diff, клиент contract registry и работа с PostgreSQL вынесены в отдельный репозиторий `ingestion-core`.
@@ -41,16 +54,33 @@ Docker image для Airflow собирается из `ingestion-airflow`, но 
 ```bash
 cd ingestion-airflow/docker
 cp .env.example .env
-docker compose up --build -d
+docker compose up --build -d --remove-orphans
 ```
 
 Сервисы:
 - `airflow-init`
-- `airflow-webserver` (`http://localhost:8088`, `airflow/airflow`)
+- `airflow-api-server` (`http://localhost:8088`)
 - `airflow-scheduler`
+- `airflow-dag-processor`
 
 Переменные окружения:
+- `AIRFLOW__API__BASE_URL`
+- `AIRFLOW__API__WORKERS`
+- `AIRFLOW__CORE__EXECUTION_API_SERVER_URL`
+- `AIRFLOW__API_AUTH__JWT_SECRET`
+- `AIRFLOW__FAB__CONFIG_FILE`
+- `AIRFLOW_OAUTH_CLIENT_ID`
+- `AIRFLOW_OAUTH_CLIENT_SECRET`
+- `AIRFLOW_OAUTH_ISSUER_URL`
+- `AIRFLOW_OAUTH_INTERNAL_ISSUER_URL`
+- `AIRFLOW_OAUTH_PROVIDER_NAME`
+- `AIRFLOW_OAUTH_SCOPE`
 - `CONTRACTS_SERVICE_URL`
+- `CONTRACTS_OIDC_TOKEN_URL`
+- `CONTRACTS_OIDC_CLIENT_ID`
+- `CONTRACTS_OIDC_CLIENT_SECRET`
+- `CONTRACTS_OIDC_SCOPE`
+- `CONTRACTS_OIDC_VERIFY_SSL`
 - `AIRFLOW_METADATA_DSN`
 - `AUDIT_DATABASE_DSN`
 - `LANDING_S3_BUCKET`
@@ -67,45 +97,51 @@ docker compose up --build -d
 - `AWS_SECRET_ACCESS_KEY`
 - `AWS_SESSION_TOKEN`
 
-Готовый шаблон окружения для локального стенда лежит в `docker/.env.example`.
-Готовый пример `dag_run.conf` лежит в `docker/dag_run.hashdiff.orders.example.json`.
+Шаблон окружения для локального стенда лежит в `docker/.env.example`.
+Пример `dag_run.conf` для основного DAG лежит в `docker/dag_run.hashdiff.orders.example.json`.
+Пример `dag_run.conf` для replay DAG лежит в `docker/dag_run.hashdiff.replay.example.json`.
 
-По умолчанию DAG использует flow `Keycloak client_credentials -> MinIO AssumeRoleWithWebIdentity -> temporary S3 credentials`.
+Для Airflow `3.x` с `LocalExecutor` внешний URL и внутренний execution API должны быть разведены:
+- `AIRFLOW__API__BASE_URL=http://localhost:8088`
+- `AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://airflow-api-server:8080/execution/`
+- `AIRFLOW__API_AUTH__JWT_SECRET=<одинаковое значение для всех Airflow контейнеров>`
+
 Статические `AWS_*` переменные оставлены только как fallback.
 
-## Trigger DAG
+## Airflow доступ через Keycloak
 
-Пример запуска через Airflow REST API:
+Airflow запускается на версии `3.0.6` и использует стандартный
+`FabAuthManager` с OAuth SSO через Keycloak.
 
-```bash
-curl -u airflow:airflow -X POST "http://localhost:8088/api/v1/dags/ingest_contract_hashdiff/dagRuns" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "dag_run_id": "manual-orders-1",
-    "conf": {
-      "contracts_service_url": "http://host.docker.internal:8000",
-      "namespace": "sales",
-      "name": "orders",
-      "contract_version": "1.0.0",
-      "source_dsn": "postgresql+psycopg2://postgres:postgres@host.docker.internal:5432/test_data_set",
-      "source_table": "public.orders",
-      "target_dsn": "postgresql+psycopg2://postgres:postgres@host.docker.internal:5432/data_lake",
-      "target_table_raw": "raw.sales__orders",
-      "target_table_curated": "curated.orders",
-      "landing_s3_bucket": "ingestion-landing",
-      "landing_s3_prefix": "accepted",
-      "landing_s3_endpoint_url": "http://host.docker.internal:9000",
-      "landing_s3_region": "us-east-1",
-      "landing_s3_verify_ssl": false,
-      "source_batch_size": 1000,
-      "raw_load_batch_size": 1000,
-      "upsert_batch_size": 1000
-    }
-  }'
-```
+Для Docker-контура issuer разделён на два URL:
 
-## Тесты
+- `AIRFLOW_OAUTH_ISSUER_URL=http://localhost:8081/realms/vkr` для browser redirect и проверки `iss`
+- `AIRFLOW_OAUTH_INTERNAL_ISSUER_URL=http://host.docker.internal:8081/realms/vkr` для server-side token exchange и JWKS fetch из контейнера
 
-```bash
-tox
-```
+Role mapping строится по `realm_access.roles` access token-а Keycloak:
+
+- `Viewer` -> `Viewer`
+- `User` -> `User`
+- `Op` -> `Op`
+- `Admin` -> `Admin`
+- `SuperAdmin` -> `Admin`
+
+Для стенда bootstrap поднимает:
+
+- Keycloak client `airflow-auth`
+- realm roles `Viewer`, `User`, `Op`, `Admin`, `SuperAdmin`
+- mappings:
+  - `admin / admin` -> `SuperAdmin`
+  - `producer / producer` -> `User`
+  - `consumer / consumer` -> `User + Op`
+
+При `docker compose up --build -d` init-контейнер:
+
+1. выполняет `airflow db migrate`
+2. применяет audit migrations
+
+Для входа в UI:
+
+1. открой `http://localhost:8088`
+2. нажми login через Keycloak
+3. авторизуйся пользователем (базовые пользователи: `admin`, `producer` или `consumer`)

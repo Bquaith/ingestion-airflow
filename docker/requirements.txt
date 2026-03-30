@@ -1,5 +1,6 @@
 # Additional Python deps for Airflow image.
 # Keep this list minimal and compatible with apache-airflow base image.
-requests==2.32.3
-boto3==1.36.26
+requests==2.32.5
+boto3==1.39.11
 psycopg2-binary==2.9.10
+PyJWT[crypto]==2.10.1

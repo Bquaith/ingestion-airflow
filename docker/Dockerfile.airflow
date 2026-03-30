@@ -1,10 +1,11 @@
-FROM apache/airflow:2.10.4-python3.11
+FROM apache/airflow:3.0.6-python3.11
 
 USER airflow
 
+COPY --chown=airflow:0 ingestion-airflow/docker/webserver_config.py /opt/airflow/webserver_config.py
 COPY --chown=airflow:0 ingestion-airflow /opt/ingestion-airflow
 COPY --chown=airflow:0 ingestion-core /opt/ingestion-core
-RUN pip install --no-cache-dir "apache-airflow==2.10.4" -r /opt/ingestion-airflow/docker/requirements.txt \
+RUN pip install --no-cache-dir "apache-airflow==3.0.6" -r /opt/ingestion-airflow/docker/requirements.txt \
     && find /opt/ingestion-core /opt/ingestion-airflow -mindepth 1 -maxdepth 2 \
         \( -name '*.egg-info' -o -name build -o -name dist \) -exec rm -rf {} + \
     && pip install --no-cache-dir --no-deps /opt/ingestion-core /opt/ingestion-airflow

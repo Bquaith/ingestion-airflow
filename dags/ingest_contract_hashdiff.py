@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime
 import logging
-import os
 from typing import Any, Callable
 
 from airflow.decorators import dag, task
@@ -22,6 +21,12 @@ from ingestion_airflow.db.audit import (
     start_run_audit,
     start_stage_audit,
 )
+from ingestion_airflow.runtime import (
+    build_contracts_token_provider,
+    build_hashdiff_artifacts,
+    build_object_store_config,
+)
+from ingestion_airflow.task_runtime import get_missing_return_value_tasks
 from ingestion_core.contracts_client import ContractRegistryClient
 from ingestion_core.hash_diff import ContractDefinition
 from ingestion_core.hash_diff_pipeline import (
@@ -31,12 +36,6 @@ from ingestion_core.hash_diff_pipeline import (
     merge_raw_snapshot_to_curated,
     validate_extracted_snapshot,
 )
-from ingestion_core.oidc_sts import (
-    OIDCClientCredentialsConfig,
-    WebIdentitySTSConfig,
-    exchange_client_credentials_for_sts,
-)
-from ingestion_core.object_store import ObjectStoreConfig
 from ingestion_core.postgres import create_sqlalchemy_engine
 
 
@@ -55,71 +54,9 @@ PIPELINE_TASK_IDS = [
 logger = logging.getLogger(__name__)
 
 
-def _build_object_store_config(config: IngestionRunConfig) -> ObjectStoreConfig:
-    keycloak_token_url = (os.getenv("KEYCLOAK_TOKEN_URL") or "").strip()
-    keycloak_client_id = (os.getenv("KEYCLOAK_CLIENT_ID") or "").strip()
-    keycloak_client_secret = os.getenv("KEYCLOAK_CLIENT_SECRET") or ""
-    minio_sts_endpoint = (os.getenv("MINIO_STS_ENDPOINT") or "").strip()
-
-    if keycloak_token_url and keycloak_client_id and keycloak_client_secret and minio_sts_endpoint:
-        sts_duration_seconds_raw = os.getenv("MINIO_STS_DURATION_SECONDS", "3600")
-        try:
-            sts_duration_seconds = int(sts_duration_seconds_raw)
-        except ValueError as exc:
-            raise ValueError("MINIO_STS_DURATION_SECONDS must be an integer") from exc
-        if sts_duration_seconds <= 0:
-            raise ValueError("MINIO_STS_DURATION_SECONDS must be greater than zero")
-
-        credentials = exchange_client_credentials_for_sts(
-            oidc_config=OIDCClientCredentialsConfig(
-                token_url=keycloak_token_url,
-                client_id=keycloak_client_id,
-                client_secret=keycloak_client_secret,
-            ),
-            sts_config=WebIdentitySTSConfig(
-                endpoint_url=minio_sts_endpoint,
-                duration_seconds=sts_duration_seconds,
-                verify_ssl=config.landing_s3_verify_ssl,
-            ),
-        )
-
-        return ObjectStoreConfig(
-            bucket=config.landing_s3_bucket,
-            prefix=config.landing_s3_prefix,
-            endpoint_url=config.landing_s3_endpoint_url,
-            region_name=config.landing_s3_region,
-            verify_ssl=config.landing_s3_verify_ssl,
-            access_key_id=credentials.access_key_id,
-            secret_access_key=credentials.secret_access_key,
-            session_token=credentials.session_token,
-        )
-
-    access_key_id = os.getenv("AWS_ACCESS_KEY_ID") or None
-    secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY") or None
-    session_token = os.getenv("AWS_SESSION_TOKEN") or None
-
-    if not access_key_id or not secret_access_key:
-        raise ValueError(
-            "Object store credentials are not configured. "
-            "Set KEYCLOAK_TOKEN_URL/KEYCLOAK_CLIENT_ID/KEYCLOAK_CLIENT_SECRET/MINIO_STS_ENDPOINT "
-            "for STS flow or provide AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY."
-        )
-
-    return ObjectStoreConfig(
-        bucket=config.landing_s3_bucket,
-        prefix=config.landing_s3_prefix,
-        endpoint_url=config.landing_s3_endpoint_url,
-        region_name=config.landing_s3_region,
-        verify_ssl=config.landing_s3_verify_ssl,
-        access_key_id=access_key_id,
-        secret_access_key=secret_access_key,
-        session_token=session_token,
-    )
-
-
 @dag(
     dag_id="ingest_contract_hashdiff",
-    start_date=datetime(2024, 1, 1),
+    start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
     max_active_runs=1,
@@ -136,7 +73,6 @@ def ingest_contract_hashdiff() -> None:
         run_id: str,
         checkpoint: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        base_key = f"{config.namespace}/{config.name}/run_id={run_id}"
         return {
             "run_id": run_id,
             "pipeline_id": config.pipeline_id,
@@ -144,15 +80,7 @@ def ingest_contract_hashdiff() -> None:
             "target_table_curated": config.target_table_curated,
             "previous_checkpoint_run_id": checkpoint.get("run_id") if checkpoint else None,
             "previous_checkpoint_updated_at": checkpoint.get("updated_at") if checkpoint else None,
-            "artifacts": {
-                "extract_object_key": f"{base_key}/extract/source_snapshot.ndjson.gz",
-                "extract_manifest_key": f"{base_key}/extract/manifest.json",
-                "validated_object_key": f"{base_key}/validate/validated_snapshot.ndjson.gz",
-                "validation_error_key": f"{base_key}/validate/errors.ndjson.gz",
-                "validation_manifest_key": f"{base_key}/validate/manifest.json",
-                "accepted_object_key": f"{base_key}/land/accepted_snapshot.ndjson.gz",
-                "landing_manifest_key": f"{base_key}/land/manifest.json",
-            },
+            "artifacts": build_hashdiff_artifacts(config.namespace, config.name, run_id),
         }
 
     def _execute_stage(
@@ -205,8 +133,12 @@ def ingest_contract_hashdiff() -> None:
     @task
     def fetch_contract() -> dict[str, Any]:
         config = _load_run_config()
+        token_provider = build_contracts_token_provider()
 
-        client = ContractRegistryClient(config.contracts_service_url)
+        client = ContractRegistryClient(
+            config.contracts_service_url,
+            token_provider=token_provider,
+        )
         contract_payload = client.fetch_contract(
             namespace=config.namespace,
             name=config.name,
@@ -277,7 +209,7 @@ def ingest_contract_hashdiff() -> None:
     ) -> dict[str, Any]:
         config = _load_run_config()
         contract = ContractDefinition.from_registry_payload(contract_payload)
-        object_store_config = _build_object_store_config(config)
+        object_store_config = build_object_store_config(config)
         artifacts = run_context["artifacts"]
 
         return _execute_stage(
@@ -302,7 +234,7 @@ def ingest_contract_hashdiff() -> None:
     ) -> dict[str, Any]:
         config = _load_run_config()
         contract = ContractDefinition.from_registry_payload(contract_payload)
-        object_store_config = _build_object_store_config(config)
+        object_store_config = build_object_store_config(config)
         artifacts = run_context["artifacts"]
 
         return _execute_stage(
@@ -321,7 +253,7 @@ def ingest_contract_hashdiff() -> None:
     @task
     def land_snapshot(run_context: dict[str, Any], validation_result: dict[str, Any]) -> dict[str, Any]:
         config = _load_run_config()
-        object_store_config = _build_object_store_config(config)
+        object_store_config = build_object_store_config(config)
         artifacts = run_context["artifacts"]
 
         return _execute_stage(
@@ -344,7 +276,7 @@ def ingest_contract_hashdiff() -> None:
     ) -> dict[str, Any]:
         config = _load_run_config()
         contract = ContractDefinition.from_registry_payload(contract_payload)
-        object_store_config = _build_object_store_config(config)
+        object_store_config = build_object_store_config(config)
 
         return _execute_stage(
             run_context["run_id"],
@@ -454,14 +386,8 @@ def ingest_contract_hashdiff() -> None:
         audit_engine = create_sqlalchemy_engine(config.audit_dsn)
         context = get_current_context()
         task_instance = context["ti"]
-        dag_run = context["dag_run"]
 
-        task_states = {instance.task_id: instance.state for instance in dag_run.get_task_instances()}
-        failed_tasks = [
-            task_id
-            for task_id in PIPELINE_TASK_IDS
-            if task_states.get(task_id) in {"failed", "upstream_failed", "skipped"}
-        ]
+        failed_tasks = get_missing_return_value_tasks(task_instance, PIPELINE_TASK_IDS)
 
         merge_result = task_instance.xcom_pull(task_ids="merge_curated") or {}
         extract_result = task_instance.xcom_pull(task_ids="extract_snapshot") or {}
