@@ -108,7 +108,7 @@ def replay_contract_hashdiff_from_minio() -> None:
         finally:
             audit_engine.dispose()
 
-    @task
+    @task(multiple_outputs=False)
     def resolve_replay_input() -> dict[str, Any]:
         config = _load_run_config()
         object_store_config = build_object_store_config(config)
@@ -147,7 +147,7 @@ def replay_contract_hashdiff_from_minio() -> None:
             "replay_reason": config.replay_reason,
         }
 
-    @task
+    @task(multiple_outputs=False)
     def fetch_contract(replay_input: dict[str, Any]) -> dict[str, Any]:
         config = _load_run_config()
         token_provider = build_contracts_token_provider()
@@ -162,7 +162,7 @@ def replay_contract_hashdiff_from_minio() -> None:
         )
         return contract_payload.to_dict()
 
-    @task
+    @task(multiple_outputs=False)
     def start_replay_run(
         contract_payload: dict[str, Any],
         replay_input: dict[str, Any],
@@ -223,7 +223,7 @@ def replay_contract_hashdiff_from_minio() -> None:
         finally:
             audit_engine.dispose()
 
-    @task
+    @task(multiple_outputs=False)
     def load_raw_replay(
         contract_payload: dict[str, Any],
         run_context: dict[str, Any],
@@ -246,7 +246,7 @@ def replay_contract_hashdiff_from_minio() -> None:
             ).to_dict(),
         )
 
-    @task
+    @task(multiple_outputs=False)
     def merge_curated_replay(
         contract_payload: dict[str, Any],
         run_context: dict[str, Any],
@@ -281,8 +281,8 @@ def replay_contract_hashdiff_from_minio() -> None:
 
         return _execute_stage(run_context["run_id"], "merge_curated", _merge)
 
-    @task(trigger_rule=TriggerRule.ALL_DONE)
-    def finalize_replay(run_context: dict[str, Any]) -> None:
+    @task(trigger_rule=TriggerRule.ALL_DONE, multiple_outputs=False)
+    def finalize_replay(run_context: dict[str, Any]) -> dict[str, bool]:
         config = _load_run_config()
         audit_engine = create_sqlalchemy_engine(config.audit_dsn)
         context = get_current_context()
@@ -341,6 +341,8 @@ def replay_contract_hashdiff_from_minio() -> None:
             )
             finalize_pipeline_state(audit_engine, config.pipeline_id)
             audit_engine.dispose()
+
+        return {"finalized": True}
 
     replay_input = resolve_replay_input()
     contract_payload = fetch_contract(replay_input)

@@ -130,7 +130,7 @@ def ingest_contract_hashdiff() -> None:
         finally:
             audit_engine.dispose()
 
-    @task
+    @task(multiple_outputs=False)
     def fetch_contract() -> dict[str, Any]:
         config = _load_run_config()
         token_provider = build_contracts_token_provider()
@@ -146,20 +146,20 @@ def ingest_contract_hashdiff() -> None:
         )
         return contract_payload.to_dict()
 
-    @task
-    def read_checkpoint() -> dict[str, Any] | None:
+    @task(multiple_outputs=False)
+    def read_checkpoint() -> dict[str, Any]:
         config = _load_run_config()
 
         audit_engine = create_sqlalchemy_engine(config.audit_dsn)
         try:
-            return read_pipeline_checkpoint(audit_engine, config.pipeline_id)
+            return read_pipeline_checkpoint(audit_engine, config.pipeline_id) or {}
         finally:
             audit_engine.dispose()
 
-    @task
+    @task(multiple_outputs=False)
     def start_run(
         contract_payload: dict[str, Any],
-        checkpoint: dict[str, Any] | None,
+        checkpoint: dict[str, Any],
     ) -> dict[str, Any]:
         config = _load_run_config()
         audit_engine = create_sqlalchemy_engine(config.audit_dsn)
@@ -202,7 +202,7 @@ def ingest_contract_hashdiff() -> None:
         finally:
             audit_engine.dispose()
 
-    @task
+    @task(multiple_outputs=False)
     def extract_snapshot(
         contract_payload: dict[str, Any],
         run_context: dict[str, Any],
@@ -226,7 +226,7 @@ def ingest_contract_hashdiff() -> None:
             ).to_dict(),
         )
 
-    @task
+    @task(multiple_outputs=False)
     def validate_snapshot(
         contract_payload: dict[str, Any],
         run_context: dict[str, Any],
@@ -250,7 +250,7 @@ def ingest_contract_hashdiff() -> None:
             ).to_dict(),
         )
 
-    @task
+    @task(multiple_outputs=False)
     def land_snapshot(run_context: dict[str, Any], validation_result: dict[str, Any]) -> dict[str, Any]:
         config = _load_run_config()
         object_store_config = build_object_store_config(config)
@@ -268,7 +268,7 @@ def ingest_contract_hashdiff() -> None:
             ).to_dict(),
         )
 
-    @task
+    @task(multiple_outputs=False)
     def load_raw(
         contract_payload: dict[str, Any],
         run_context: dict[str, Any],
@@ -292,7 +292,7 @@ def ingest_contract_hashdiff() -> None:
             ).to_dict(),
         )
 
-    @task
+    @task(multiple_outputs=False)
     def merge_curated(
         contract_payload: dict[str, Any],
         run_context: dict[str, Any],
@@ -327,7 +327,7 @@ def ingest_contract_hashdiff() -> None:
 
         return _execute_stage(run_context["run_id"], "merge_curated", _merge)
 
-    @task
+    @task(multiple_outputs=False)
     def persist_checkpoint_task(
         contract_payload: dict[str, Any],
         run_context: dict[str, Any],
@@ -380,8 +380,8 @@ def ingest_contract_hashdiff() -> None:
 
         return _execute_stage(run_context["run_id"], "persist_checkpoint", _persist)
 
-    @task(trigger_rule=TriggerRule.ALL_DONE)
-    def finalize_run(run_context: dict[str, Any]) -> None:
+    @task(trigger_rule=TriggerRule.ALL_DONE, multiple_outputs=False)
+    def finalize_run(run_context: dict[str, Any]) -> dict[str, bool]:
         config = _load_run_config()
         audit_engine = create_sqlalchemy_engine(config.audit_dsn)
         context = get_current_context()
@@ -430,6 +430,8 @@ def ingest_contract_hashdiff() -> None:
             )
             finalize_pipeline_state(audit_engine, config.pipeline_id)
             audit_engine.dispose()
+
+        return {"finalized": True}
 
     contract_payload = fetch_contract()
     checkpoint = read_checkpoint()
