@@ -30,11 +30,8 @@ from ingestion_airflow.task_runtime import get_missing_return_value_tasks
 from ingestion_core.contracts_client import ContractRegistryClient
 from ingestion_core.hash_diff import ContractDefinition
 from ingestion_core.hash_diff_pipeline import (
-    extract_source_snapshot,
-    land_validated_snapshot,
-    load_raw_snapshot,
-    merge_raw_snapshot_to_curated,
-    validate_extracted_snapshot,
+    extract_validate_land_snapshot,
+    merge_accepted_snapshot_to_curated,
 )
 from ingestion_core.postgres import create_sqlalchemy_engine
 
@@ -43,10 +40,7 @@ PIPELINE_TASK_IDS = [
     "fetch_contract",
     "read_checkpoint",
     "start_run",
-    "extract_snapshot",
-    "validate_snapshot",
-    "land_snapshot",
-    "load_raw",
+    "extract_validate_land",
     "merge_curated",
     "persist_checkpoint_task",
 ]
@@ -76,7 +70,6 @@ def ingest_contract_hashdiff() -> None:
         return {
             "run_id": run_id,
             "pipeline_id": config.pipeline_id,
-            "target_table_raw": config.target_table_raw,
             "target_table_curated": config.target_table_curated,
             "previous_checkpoint_run_id": checkpoint.get("run_id") if checkpoint else None,
             "previous_checkpoint_updated_at": checkpoint.get("updated_at") if checkpoint else None,
@@ -203,7 +196,7 @@ def ingest_contract_hashdiff() -> None:
             audit_engine.dispose()
 
     @task(multiple_outputs=False)
-    def extract_snapshot(
+    def extract_validate_land(
         contract_payload: dict[str, Any],
         run_context: dict[str, Any],
     ) -> dict[str, Any]:
@@ -214,81 +207,16 @@ def ingest_contract_hashdiff() -> None:
 
         return _execute_stage(
             run_context["run_id"],
-            "extract",
-            lambda: extract_source_snapshot(
+            "extract_validate_land",
+            lambda: extract_validate_land_snapshot(
                 source_dsn=config.source_dsn,
                 source_table=config.source_table,
                 contract=contract,
                 object_store_config=object_store_config,
-                extracted_object_key=artifacts["extract_object_key"],
-                manifest_key=artifacts["extract_manifest_key"],
-                source_batch_size=config.source_batch_size,
-            ).to_dict(),
-        )
-
-    @task(multiple_outputs=False)
-    def validate_snapshot(
-        contract_payload: dict[str, Any],
-        run_context: dict[str, Any],
-        extract_result: dict[str, Any],
-    ) -> dict[str, Any]:
-        config = _load_run_config()
-        contract = ContractDefinition.from_registry_payload(contract_payload)
-        object_store_config = build_object_store_config(config)
-        artifacts = run_context["artifacts"]
-
-        return _execute_stage(
-            run_context["run_id"],
-            "validate",
-            lambda: validate_extracted_snapshot(
-                contract=contract,
-                object_store_config=object_store_config,
-                extracted_object_key=str(extract_result["object_key"]),
-                validated_object_key=artifacts["validated_object_key"],
+                accepted_object_key=artifacts["accepted_object_key"],
                 error_object_key=artifacts["validation_error_key"],
                 manifest_key=artifacts["validation_manifest_key"],
-            ).to_dict(),
-        )
-
-    @task(multiple_outputs=False)
-    def land_snapshot(run_context: dict[str, Any], validation_result: dict[str, Any]) -> dict[str, Any]:
-        config = _load_run_config()
-        object_store_config = build_object_store_config(config)
-        artifacts = run_context["artifacts"]
-
-        return _execute_stage(
-            run_context["run_id"],
-            "land",
-            lambda: land_validated_snapshot(
-                object_store_config=object_store_config,
-                staged_validated_object_key=str(validation_result["validated_object_key"]),
-                accepted_object_key=artifacts["accepted_object_key"],
-                manifest_key=artifacts["landing_manifest_key"],
-                row_count=int(validation_result["valid_row_count"]),
-            ).to_dict(),
-        )
-
-    @task(multiple_outputs=False)
-    def load_raw(
-        contract_payload: dict[str, Any],
-        run_context: dict[str, Any],
-        landed_result: dict[str, Any],
-    ) -> dict[str, Any]:
-        config = _load_run_config()
-        contract = ContractDefinition.from_registry_payload(contract_payload)
-        object_store_config = build_object_store_config(config)
-
-        return _execute_stage(
-            run_context["run_id"],
-            "load_raw",
-            lambda: load_raw_snapshot(
-                target_dsn=config.target_dsn,
-                target_table_raw=config.target_table_raw,
-                contract=contract,
-                object_store_config=object_store_config,
-                accepted_object_key=str(landed_result["accepted_object_key"]),
-                run_id=str(run_context["run_id"]),
-                raw_load_batch_size=config.raw_load_batch_size,
+                source_batch_size=config.source_batch_size,
             ).to_dict(),
         )
 
@@ -296,19 +224,20 @@ def ingest_contract_hashdiff() -> None:
     def merge_curated(
         contract_payload: dict[str, Any],
         run_context: dict[str, Any],
-        raw_result: dict[str, Any],
+        accepted_result: dict[str, Any],
     ) -> dict[str, Any]:
-        del raw_result
         config = _load_run_config()
         contract = ContractDefinition.from_registry_payload(contract_payload)
+        object_store_config = build_object_store_config(config)
 
         def _merge() -> dict[str, Any]:
-            result = merge_raw_snapshot_to_curated(
+            result = merge_accepted_snapshot_to_curated(
                 target_dsn=config.target_dsn,
-                target_table_raw=config.target_table_raw,
                 target_table_curated=config.target_table_curated,
                 contract=contract,
-                run_id=str(run_context["run_id"]),
+                object_store_config=object_store_config,
+                accepted_object_key=str(accepted_result["accepted_object_key"]),
+                merge_load_batch_size=config.merge_load_batch_size,
                 source_batch_size=config.source_batch_size,
                 upsert_batch_size=config.upsert_batch_size,
             )
@@ -331,10 +260,7 @@ def ingest_contract_hashdiff() -> None:
     def persist_checkpoint_task(
         contract_payload: dict[str, Any],
         run_context: dict[str, Any],
-        extract_result: dict[str, Any],
-        validation_result: dict[str, Any],
-        landed_result: dict[str, Any],
-        raw_result: dict[str, Any],
+        accepted_result: dict[str, Any],
         merge_result: dict[str, Any],
     ) -> dict[str, Any]:
         config = _load_run_config()
@@ -350,17 +276,11 @@ def ingest_contract_hashdiff() -> None:
                 "checksum": contract.checksum,
                 "previous_checkpoint_run_id": run_context.get("previous_checkpoint_run_id"),
                 "previous_checkpoint_updated_at": run_context.get("previous_checkpoint_updated_at"),
-                "extract_object_key": extract_result.get("object_key"),
-                "validated_object_key": validation_result.get("validated_object_key"),
-                "validation_error_object_key": validation_result.get("error_object_key"),
-                "accepted_object_key": landed_result.get("accepted_object_key"),
+                "accepted_object_key": accepted_result.get("accepted_object_key"),
+                "validation_error_object_key": accepted_result.get("error_object_key"),
                 "source_table": config.source_table,
-                "target_table_raw": config.target_table_raw,
                 "target_table_curated": config.target_table_curated,
-                "extract": extract_result,
-                "validate": validation_result,
-                "land": landed_result,
-                "load_raw": raw_result,
+                "extract_validate_land": accepted_result,
                 "merge": merge_result,
                 "last_completed_run_id": run_context["run_id"],
             }
@@ -390,7 +310,7 @@ def ingest_contract_hashdiff() -> None:
         failed_tasks = get_missing_return_value_tasks(task_instance, PIPELINE_TASK_IDS)
 
         merge_result = task_instance.xcom_pull(task_ids="merge_curated") or {}
-        extract_result = task_instance.xcom_pull(task_ids="extract_snapshot") or {}
+        accepted_result = task_instance.xcom_pull(task_ids="extract_validate_land") or {}
         checkpoint_result = task_instance.xcom_pull(task_ids="persist_checkpoint_task") or {}
 
         try:
@@ -399,7 +319,7 @@ def ingest_contract_hashdiff() -> None:
                     engine=audit_engine,
                     run_id=str(run_context["run_id"]),
                     status="failed",
-                    read_count=int(extract_result.get("row_count", 0) or 0),
+                    read_count=int(accepted_result.get("source_row_count", 0) or 0),
                     insert_count=int(merge_result.get("insert_count", 0) or 0),
                     update_count=int(merge_result.get("update_count", 0) or 0),
                     unchanged_count=int(merge_result.get("unchanged_count", 0) or 0),
@@ -436,26 +356,18 @@ def ingest_contract_hashdiff() -> None:
     contract_payload = fetch_contract()
     checkpoint = read_checkpoint()
     run_context = start_run(contract_payload, checkpoint)
-    extract_result = extract_snapshot(contract_payload, run_context)
-    validation_result = validate_snapshot(contract_payload, run_context, extract_result)
-    landed_result = land_snapshot(run_context, validation_result)
-    raw_result = load_raw(contract_payload, run_context, landed_result)
-    merge_result = merge_curated(contract_payload, run_context, raw_result)
+    accepted_result = extract_validate_land(contract_payload, run_context)
+    merge_result = merge_curated(contract_payload, run_context, accepted_result)
     checkpoint_result = persist_checkpoint_task(
         contract_payload,
         run_context,
-        extract_result,
-        validation_result,
-        landed_result,
-        raw_result,
+        accepted_result,
         merge_result,
     )
     finalize_task = finalize_run(run_context)
 
     checkpoint_result >> finalize_task
-    validation_result >> finalize_task
-    landed_result >> finalize_task
-    raw_result >> finalize_task
+    accepted_result >> finalize_task
     merge_result >> finalize_task
 
 

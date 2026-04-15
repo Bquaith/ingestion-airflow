@@ -27,12 +27,11 @@ from ingestion_airflow.runtime import (
 from ingestion_airflow.task_runtime import get_missing_return_value_tasks
 from ingestion_core.contracts_client import ContractRegistryClient
 from ingestion_core.hash_diff import ContractDefinition
-from ingestion_core.hash_diff_pipeline import load_raw_snapshot, merge_raw_snapshot_to_curated
+from ingestion_core.hash_diff_pipeline import merge_accepted_snapshot_to_curated
 from ingestion_core.object_store import ObjectStoreClient
 from ingestion_core.postgres import create_sqlalchemy_engine
 
 REPLAY_STAGE_TASK_IDS = [
-    "load_raw_replay",
     "merge_curated_replay",
 ]
 
@@ -41,10 +40,10 @@ logger = logging.getLogger(__name__)
 
 def _derive_validation_manifest_key(accepted_object_key: str) -> str | None:
     normalized_key = accepted_object_key.strip().strip("/")
-    accepted_suffix = "/land/accepted_snapshot.ndjson.gz"
+    accepted_suffix = "/accepted/accepted_snapshot.ndjson.gz"
     if not normalized_key.endswith(accepted_suffix):
         return None
-    return normalized_key[: -len(accepted_suffix)] + "/validate/manifest.json"
+    return normalized_key[: -len(accepted_suffix)] + "/accepted/manifest.json"
 
 
 @dag(
@@ -192,7 +191,6 @@ def replay_contract_hashdiff_from_minio() -> None:
             return {
                 "run_id": run_id,
                 "pipeline_id": config.pipeline_id,
-                "target_table_raw": config.target_table_raw,
                 "target_table_curated": config.target_table_curated,
                 "accepted_object_key": str(replay_input["accepted_object_key"]),
                 "validation_manifest_key": replay_input.get("validation_manifest_key"),
@@ -224,7 +222,7 @@ def replay_contract_hashdiff_from_minio() -> None:
             audit_engine.dispose()
 
     @task(multiple_outputs=False)
-    def load_raw_replay(
+    def merge_curated_replay(
         contract_payload: dict[str, Any],
         run_context: dict[str, Any],
     ) -> dict[str, Any]:
@@ -232,37 +230,14 @@ def replay_contract_hashdiff_from_minio() -> None:
         contract = ContractDefinition.from_registry_payload(contract_payload)
         object_store_config = build_object_store_config(config)
 
-        return _execute_stage(
-            run_context["run_id"],
-            "load_raw",
-            lambda: load_raw_snapshot(
+        def _merge() -> dict[str, Any]:
+            result = merge_accepted_snapshot_to_curated(
                 target_dsn=config.target_dsn,
-                target_table_raw=config.target_table_raw,
+                target_table_curated=config.target_table_curated,
                 contract=contract,
                 object_store_config=object_store_config,
                 accepted_object_key=str(run_context["accepted_object_key"]),
-                run_id=str(run_context["run_id"]),
-                raw_load_batch_size=config.raw_load_batch_size,
-            ).to_dict(),
-        )
-
-    @task(multiple_outputs=False)
-    def merge_curated_replay(
-        contract_payload: dict[str, Any],
-        run_context: dict[str, Any],
-        raw_result: dict[str, Any],
-    ) -> dict[str, Any]:
-        del raw_result
-        config = _load_run_config()
-        contract = ContractDefinition.from_registry_payload(contract_payload)
-
-        def _merge() -> dict[str, Any]:
-            result = merge_raw_snapshot_to_curated(
-                target_dsn=config.target_dsn,
-                target_table_raw=config.target_table_raw,
-                target_table_curated=config.target_table_curated,
-                contract=contract,
-                run_id=str(run_context["run_id"]),
+                merge_load_batch_size=config.merge_load_batch_size,
                 source_batch_size=config.source_batch_size,
                 upsert_batch_size=config.upsert_batch_size,
             )
@@ -347,11 +322,9 @@ def replay_contract_hashdiff_from_minio() -> None:
     replay_input = resolve_replay_input()
     contract_payload = fetch_contract(replay_input)
     run_context = start_replay_run(contract_payload, replay_input)
-    raw_result = load_raw_replay(contract_payload, run_context)
-    merge_result = merge_curated_replay(contract_payload, run_context, raw_result)
+    merge_result = merge_curated_replay(contract_payload, run_context)
     finalize_task = finalize_replay(run_context)
 
-    raw_result >> finalize_task
     merge_result >> finalize_task
 
 

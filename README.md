@@ -14,10 +14,7 @@ DAG `ingest_contract_hashdiff` реализует hash-diff pipeline:
 fetch_contract
   -> read_checkpoint
   -> start_run
-  -> extract_snapshot
-  -> validate_snapshot
-  -> land_snapshot
-  -> load_raw
+  -> extract_validate_land
   -> merge_curated
   -> persist_checkpoint
   -> finalize_run
@@ -30,7 +27,6 @@ DAG `replay_contract_hashdiff_from_minio` переигрывает загруз�
 resolve_replay_input
   -> fetch_contract
   -> start_replay_run
-  -> load_raw_replay
   -> merge_curated_replay
   -> finalize_replay
 ```

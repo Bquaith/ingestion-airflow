@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from ingestion_airflow.config import IngestionRunConfig
+from ingestion_airflow.config import IngestionRunConfig, ReplayRunConfig
+from ingestion_airflow.runtime import build_hashdiff_artifacts
 
 
 @pytest.fixture(autouse=True)
@@ -30,10 +31,9 @@ def test_config_uses_default_batch_sizes() -> None:
     config = IngestionRunConfig.from_dagrun_conf(_base_conf())
 
     assert config.audit_dsn == "postgresql+psycopg2://audit_user:audit_pass@postgres_audit:5432/audit_db"
-    assert config.target_table_raw == "raw.sales__orders"
     assert config.landing_s3_prefix == "accepted"
     assert config.source_batch_size == 1000
-    assert config.raw_load_batch_size == 1000
+    assert config.merge_load_batch_size == 1000
     assert config.upsert_batch_size == 1000
 
 
@@ -47,7 +47,7 @@ def test_config_validates_positive_batch_sizes() -> None:
 
 def test_config_validates_batch_size_type() -> None:
     conf = _base_conf()
-    conf["raw_load_batch_size"] = "not-int"
+    conf["merge_load_batch_size"] = "not-int"
 
     with pytest.raises(ValueError, match="must be integers"):
         IngestionRunConfig.from_dagrun_conf(conf)
@@ -76,3 +76,47 @@ def test_config_parses_landing_boolean_override() -> None:
     config = IngestionRunConfig.from_dagrun_conf(conf)
 
     assert config.landing_s3_verify_ssl is False
+
+
+def test_replay_config_requires_exactly_one_replay_input() -> None:
+    conf = {
+        "contracts_service_url": "http://contracts.local",
+        "namespace": "sales",
+        "name": "orders",
+        "accepted_object_key": "accepted/orders.ndjson.gz",
+        "parent_run_id": "run-id",
+        "target_dsn": "postgresql+psycopg2://target_user:target_pass@postgres_target:5432/target_db",
+        "target_table_curated": "curated.orders",
+        "landing_s3_bucket": "integration-landing",
+    }
+
+    with pytest.raises(ValueError, match="exactly one"):
+        ReplayRunConfig.from_dagrun_conf(conf)
+
+
+def test_replay_config_uses_default_merge_batch_sizes() -> None:
+    conf = {
+        "contracts_service_url": "http://contracts.local",
+        "namespace": "sales",
+        "name": "orders",
+        "accepted_object_key": "accepted/orders.ndjson.gz",
+        "target_dsn": "postgresql+psycopg2://target_user:target_pass@postgres_target:5432/target_db",
+        "target_table_curated": "curated.orders",
+        "landing_s3_bucket": "integration-landing",
+    }
+
+    config = ReplayRunConfig.from_dagrun_conf(conf)
+
+    assert config.merge_load_batch_size == 1000
+    assert config.source_batch_size == 1000
+    assert config.upsert_batch_size == 1000
+
+
+def test_build_hashdiff_artifacts_points_to_accepted_snapshot_layout() -> None:
+    artifacts = build_hashdiff_artifacts("sales", "orders", "run-123")
+
+    assert artifacts == {
+        "accepted_object_key": "sales/orders/run_id=run-123/accepted/accepted_snapshot.ndjson.gz",
+        "validation_error_key": "sales/orders/run_id=run-123/accepted/errors.ndjson.gz",
+        "validation_manifest_key": "sales/orders/run_id=run-123/accepted/manifest.json",
+    }

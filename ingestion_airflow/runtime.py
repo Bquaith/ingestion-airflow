@@ -114,12 +114,9 @@ def build_object_store_config(config: Any) -> ObjectStoreConfig:
 
 def build_hashdiff_artifacts(namespace: str, name: str, run_id: str) -> dict[str, str]:
     base_key = f"{namespace}/{name}/run_id={run_id}"
+    accepted_base_key = f"{base_key}/accepted"
     return {
-        "extract_object_key": f"{base_key}/extract/source_snapshot.ndjson.gz",
-        "extract_manifest_key": f"{base_key}/extract/manifest.json",
-        "validated_object_key": f"{base_key}/validate/validated_snapshot.ndjson.gz",
-        "validation_error_key": f"{base_key}/validate/errors.ndjson.gz",
-        "validation_manifest_key": f"{base_key}/validate/manifest.json",
-        "accepted_object_key": f"{base_key}/land/accepted_snapshot.ndjson.gz",
-        "landing_manifest_key": f"{base_key}/land/manifest.json",
+        "accepted_object_key": f"{accepted_base_key}/accepted_snapshot.ndjson.gz",
+        "validation_error_key": f"{accepted_base_key}/errors.ndjson.gz",
+        "validation_manifest_key": f"{accepted_base_key}/manifest.json",
     }
