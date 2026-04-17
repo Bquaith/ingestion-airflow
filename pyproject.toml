@@ -37,5 +37,5 @@ include = ["ingestion_airflow*"]
 "ingestion_airflow.alembic" = ["script.py.mako"]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = [".", "../ingestion-core"]
 testpaths = ["tests"]

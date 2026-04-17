@@ -25,11 +25,10 @@ from ingestion_airflow.runtime import (
     build_object_store_config,
 )
 from ingestion_airflow.task_runtime import get_missing_return_value_tasks
-from ingestion_core.contracts_client import ContractRegistryClient
-from ingestion_core.hash_diff import ContractDefinition
-from ingestion_core.hash_diff_pipeline import merge_accepted_snapshot_to_curated
-from ingestion_core.object_store import ObjectStoreClient
-from ingestion_core.postgres import create_sqlalchemy_engine
+from ingestion_core.adapters.object_store import ObjectStoreClient
+from ingestion_core.adapters.postgres import create_sqlalchemy_engine
+from ingestion_core.contracts import ContractDefinition, ContractRegistryClient
+from ingestion_core.strategies.hash_diff import merge_accepted_snapshot_to_curated
 
 REPLAY_STAGE_TASK_IDS = [
     "merge_curated_replay",

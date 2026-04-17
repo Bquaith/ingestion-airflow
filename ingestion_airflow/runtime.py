@@ -4,8 +4,8 @@ from collections.abc import Callable
 import os
 from typing import Any
 
-from ingestion_core.object_store import ObjectStoreConfig
-from ingestion_core.oidc_sts import (
+from ingestion_core.adapters.object_store import ObjectStoreConfig
+from ingestion_core.adapters.oidc_sts import (
     OIDCClientCredentialsConfig,
     WebIdentitySTSConfig,
     exchange_client_credentials_for_sts,
