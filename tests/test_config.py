@@ -2,8 +2,17 @@ from __future__ import annotations
 
 import pytest
 
-from ingestion_airflow.config import IngestionRunConfig, ReplayRunConfig
-from ingestion_airflow.runtime import build_hashdiff_artifacts
+from ingestion_airflow.config import (
+    IncrementalAuditReplayRunConfig,
+    IncrementalAuditRunConfig,
+    IngestionRunConfig,
+    ReplayRunConfig,
+)
+from ingestion_airflow.runtime import (
+    build_hashdiff_artifacts,
+    build_incremental_audit_artifacts,
+    derive_incremental_audit_manifest_key,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +34,12 @@ def _base_conf() -> dict[str, str]:
         "target_table_curated": "curated.orders",
         "landing_s3_bucket": "integration-landing",
     }
+
+
+def _incremental_base_conf() -> dict[str, str]:
+    conf = _base_conf()
+    conf["source_audit_table"] = "ingestion_meta.orders_audit"
+    return conf
 
 
 def test_config_uses_default_batch_sizes() -> None:
@@ -120,3 +135,65 @@ def test_build_hashdiff_artifacts_points_to_accepted_snapshot_layout() -> None:
         "validation_error_key": "sales/orders/run_id=run-123/accepted/errors.ndjson.gz",
         "validation_manifest_key": "sales/orders/run_id=run-123/accepted/manifest.json",
     }
+
+
+def test_incremental_config_uses_default_batch_sizes_and_flags() -> None:
+    config = IncrementalAuditRunConfig.from_dagrun_conf(_incremental_base_conf())
+
+    assert config.extract_batch_size == 1000
+    assert config.apply_load_batch_size == 1000
+    assert config.upsert_batch_size == 1000
+    assert config.auto_setup_audit is False
+    assert config.replace_existing_trigger is False
+    assert config.watermark_mode == "auto"
+
+
+def test_incremental_config_requires_admin_dsn_for_auto_setup() -> None:
+    conf = _incremental_base_conf()
+    conf["auto_setup_audit"] = "true"
+
+    with pytest.raises(ValueError, match="source_admin_dsn"):
+        IncrementalAuditRunConfig.from_dagrun_conf(conf)
+
+
+def test_incremental_config_accepts_valid_watermark_mode() -> None:
+    conf = _incremental_base_conf()
+    conf["watermark_mode"] = "recorded_at"
+
+    config = IncrementalAuditRunConfig.from_dagrun_conf(conf)
+
+    assert config.watermark_mode == "recorded_at"
+
+
+def test_incremental_replay_config_requires_exactly_one_replay_input() -> None:
+    conf = {
+        "contracts_service_url": "http://contracts.local",
+        "namespace": "sales",
+        "name": "orders",
+        "delta_object_key": "delta/orders.ndjson.gz",
+        "parent_run_id": "run-id",
+        "target_dsn": "postgresql+psycopg2://target_user:target_pass@postgres_target:5432/target_db",
+        "target_table_curated": "curated.orders",
+        "landing_s3_bucket": "integration-landing",
+    }
+
+    with pytest.raises(ValueError, match="exactly one"):
+        IncrementalAuditReplayRunConfig.from_dagrun_conf(conf)
+
+
+def test_build_incremental_artifacts_points_to_delta_layout() -> None:
+    artifacts = build_incremental_audit_artifacts("sales", "orders", "run-123")
+
+    assert artifacts == {
+        "delta_object_key": "sales/orders/run_id=run-123/delta/accepted_delta.ndjson.gz",
+        "validation_error_key": "sales/orders/run_id=run-123/delta/errors.ndjson.gz",
+        "validation_manifest_key": "sales/orders/run_id=run-123/delta/manifest.json",
+    }
+
+
+def test_derive_incremental_manifest_key_from_delta_object_key() -> None:
+    manifest_key = derive_incremental_audit_manifest_key(
+        "sales/orders/run_id=run-123/delta/accepted_delta.ndjson.gz"
+    )
+
+    assert manifest_key == "sales/orders/run_id=run-123/delta/manifest.json"

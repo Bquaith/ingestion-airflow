@@ -5,6 +5,8 @@ Airflow runtime-репозиторий для запуска DAG-ов для и�
 Репозиторий содержит:
 - основной DAG `dags/ingest_contract_hashdiff.py`
 - replay DAG `dags/replay_contract_hashdiff_from_minio.py`
+- основной DAG `dags/ingest_contract_incremental_audit.py`
+- replay DAG `dags/replay_contract_incremental_audit_from_minio.py`
 - runtime-конфиг для чтения `dagrun.conf`
 - Docker Compose для локального запуска Airflow
 
@@ -31,6 +33,30 @@ resolve_replay_input
   -> finalize_replay
 ```
 
+DAG `ingest_contract_incremental_audit` реализует CDC-путь через source audit trigger:
+
+```text
+fetch_contract
+  -> read_checkpoint
+  -> start_run
+  -> ensure_source_audit_capture
+  -> extract_validate_land_delta
+  -> apply_delta
+  -> persist_checkpoint
+  -> finalize_run
+```
+
+DAG `replay_contract_incremental_audit_from_minio` переигрывает уже сохранённый
+`accepted_delta` в MinIO/S3:
+
+```text
+resolve_replay_input
+  -> fetch_contract
+  -> start_replay_run
+  -> apply_delta_replay
+  -> finalize_replay
+```
+
 Бизнес-логика hash-diff, клиент contract registry и работа с PostgreSQL вынесены в отдельный репозиторий `ingestion-core`.
 
 ## Локальная структура
@@ -38,7 +64,7 @@ resolve_replay_input
 Для текущей сборки репозитории должны лежать рядом:
 
 ```text
-integration-platform/
+  integration-platform/
   ingestion-core/
   ingestion-airflow/
 ```
@@ -92,10 +118,13 @@ docker compose up --build -d --remove-orphans
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
 - `AWS_SESSION_TOKEN`
+- `SOURCE_ADMIN_DSN`
 
 Шаблон окружения для локального стенда лежит в `docker/.env.example`.
 Пример `dag_run.conf` для основного DAG лежит в `docker/dag_run.hashdiff.orders.example.json`.
 Пример `dag_run.conf` для replay DAG лежит в `docker/dag_run.hashdiff.replay.example.json`.
+Пример `dag_run.conf` для incremental DAG лежит в `docker/dag_run.incremental_audit.orders.example.json`.
+Пример `dag_run.conf` для replay incremental DAG лежит в `docker/dag_run.incremental_audit.replay.example.json`.
 
 Для Airflow `3.x` с `LocalExecutor` внешний URL и внутренний execution API должны быть разведены:
 - `AIRFLOW__API__BASE_URL=http://localhost:8088`

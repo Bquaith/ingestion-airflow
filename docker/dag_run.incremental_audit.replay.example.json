@@ -1,0 +1,15 @@
+{
+  "namespace": "sales",
+  "name": "orders",
+  "parent_run_id": "862b6baa-b52a-4726-a787-a9500d5000c9",
+  "target_dsn": "postgresql+psycopg2://postgres:postgres@host.docker.internal:5432/data_lake",
+  "target_table_curated": "curated.orders",
+  "replay_reason": "rebuild curated from accepted delta after downstream failure",
+  "landing_s3_bucket": "ingestion-landing",
+  "landing_s3_prefix": "accepted",
+  "landing_s3_endpoint_url": "http://host.docker.internal:9000",
+  "landing_s3_region": "us-east-1",
+  "landing_s3_verify_ssl": false,
+  "apply_load_batch_size": 1000,
+  "upsert_batch_size": 1000
+}
