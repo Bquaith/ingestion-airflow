@@ -130,11 +130,3 @@ def build_incremental_audit_artifacts(namespace: str, name: str, run_id: str) ->
         "validation_error_key": f"{delta_base_key}/errors.ndjson.gz",
         "validation_manifest_key": f"{delta_base_key}/manifest.json",
     }
-
-
-def derive_incremental_audit_manifest_key(delta_object_key: str) -> str | None:
-    normalized_key = delta_object_key.strip().strip("/")
-    delta_suffix = "/delta/accepted_delta.ndjson.gz"
-    if not normalized_key.endswith(delta_suffix):
-        return None
-    return normalized_key[: -len(delta_suffix)] + "/delta/manifest.json"

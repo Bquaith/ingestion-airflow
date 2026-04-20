@@ -15,6 +15,7 @@ from ingestion_airflow.db.audit import (
     finalize_pipeline_state,
     finish_run_audit,
     finish_stage_audit,
+    read_stage_audit_metrics,
     release_pipeline_lock,
     start_run_audit,
     start_stage_audit,
@@ -23,7 +24,6 @@ from ingestion_airflow.runtime import (
     build_contracts_token_provider,
     build_incremental_audit_artifacts,
     build_object_store_config,
-    derive_incremental_audit_manifest_key,
 )
 from ingestion_airflow.task_runtime import get_missing_return_value_tasks
 from ingestion_core.adapters.object_store import ObjectStoreClient
@@ -36,6 +36,31 @@ REPLAY_STAGE_TASK_IDS = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def _replay_input_error(problem: str, details: list[str]) -> AirflowFailException:
+    message = "\n".join(
+        [
+            "Invalid incremental replay input.",
+            f"Problem: {problem}",
+            *details,
+        ]
+    )
+    payload = {
+        "error": "invalid_incremental_replay_input",
+        "problem": problem,
+        "details": details,
+        "message": message,
+    }
+    logger.error("INVALID_INCREMENTAL_REPLAY_INPUT\n%s", message)
+    try:
+        get_current_context()["ti"].xcom_push(key="replay_input_error", value=payload)
+    except Exception:
+        logger.debug("Could not push replay_input_error XCom", exc_info=True)
+    return AirflowFailException(
+        "Invalid incremental replay input. "
+        "See INVALID_INCREMENTAL_REPLAY_INPUT in task log or XCom key replay_input_error."
+    )
 
 
 @dag(
@@ -105,28 +130,103 @@ def replay_contract_incremental_audit_from_minio() -> None:
         object_store_config = build_object_store_config(config)
         object_store = ObjectStoreClient(object_store_config)
 
-        delta_object_key = config.delta_object_key
+        delta_object_key: str | None = None
         validation_manifest_key: str | None = None
+        parent_stage_metrics_found = False
 
-        if config.parent_run_id:
+        audit_engine = create_sqlalchemy_engine(config.audit_dsn)
+        try:
+            stage_metrics = read_stage_audit_metrics(
+                audit_engine,
+                config.parent_run_id,
+                "extract_validate_land_delta",
+            )
+        finally:
+            audit_engine.dispose()
+
+        if stage_metrics:
+            parent_stage_metrics_found = True
+            delta_object_key = str(stage_metrics.get("delta_object_key") or "").strip() or None
+            validation_manifest_key = str(stage_metrics.get("manifest_key") or "").strip() or None
+            if not delta_object_key:
+                raise _replay_input_error(
+                    "Parent incremental run has extract metadata without delta_object_key.",
+                    [
+                        f"parent_run_id: {config.parent_run_id}",
+                        "Expected: stage_audit.metrics_json.delta_object_key must point to accepted_delta.",
+                        "Fix: use a successful ingest_contract_incremental_audit run_id as parent_run_id.",
+                    ],
+                ) from None
+        else:
             artifacts = build_incremental_audit_artifacts(config.namespace, config.name, config.parent_run_id)
             delta_object_key = artifacts["delta_object_key"]
             validation_manifest_key = artifacts["validation_manifest_key"]
-        elif delta_object_key:
-            validation_manifest_key = derive_incremental_audit_manifest_key(delta_object_key)
 
         if not delta_object_key:
-            raise ValueError("Replay delta key could not be resolved")
+            raise _replay_input_error(
+                "Replay delta key could not be resolved.",
+                [
+                    "Expected: parent_run_id references a successful ingest_contract_incremental_audit run.",
+                    "Fix: use the ingestion audit run_id from ingestion_meta.run_audit or start_run XCom.",
+                ],
+            ) from None
 
         contract_version = config.contract_version
         if contract_version is None and validation_manifest_key:
+            if not object_store.object_exists(validation_manifest_key):
+                normalized_manifest_key = object_store_config.normalize_key(validation_manifest_key)
+                if config.parent_run_id:
+                    expected_artifacts = build_incremental_audit_artifacts(
+                        config.namespace,
+                        config.name,
+                        config.parent_run_id,
+                    )
+                    expected_delta_key = object_store_config.normalize_key(expected_artifacts["delta_object_key"])
+                    raise _replay_input_error(
+                        "Incremental replay manifest was not found in object store.",
+                        [
+                            f"parent_run_id: {config.parent_run_id}",
+                            "Expected: parent_run_id must be a successful ingest_contract_incremental_audit "
+                            "run_id from ingestion_meta.run_audit, not an Airflow DagRun id and not a hash-diff run.",
+                            f"Successful extract stage metadata found in audit DB: {parent_stage_metrics_found}",
+                            f"Expected manifest key: {normalized_manifest_key}",
+                            f"Expected delta key: {expected_delta_key}",
+                            "Fix: use the ingestion audit run_id from ingestion_meta.run_audit or start_run XCom.",
+                        ],
+                    ) from None
+                raise _replay_input_error(
+                    "Incremental replay could not derive contract_version because manifest was not found.",
+                    [
+                        f"Expected manifest key: {normalized_manifest_key}",
+                        "Expected: either manifest exists or contract_version is provided explicitly.",
+                        "Fix: use a parent_run_id from a successful ingest_contract_incremental_audit run.",
+                    ],
+                ) from None
             manifest_payload = object_store.get_json(validation_manifest_key)
             manifest_version = manifest_payload.get("contract_version")
             if isinstance(manifest_version, str) and manifest_version.strip():
                 contract_version = manifest_version.strip()
 
         if contract_version is None:
-            raise ValueError("Replay requires contract_version or a resolvable manifest with contract_version")
+            raise _replay_input_error(
+                "Replay requires contract_version or a resolvable manifest with contract_version.",
+                    [
+                        "Expected: contract_version is present in dag_run.conf or manifest.json.",
+                        "Fix: provide contract_version explicitly or use a parent_run_id whose manifest exists.",
+                    ],
+                ) from None
+
+        if not object_store.object_exists(delta_object_key):
+            normalized_delta_key = object_store_config.normalize_key(delta_object_key)
+            raise _replay_input_error(
+                "Incremental replay delta artifact was not found in object store.",
+                [
+                    f"Expected delta key: {normalized_delta_key}",
+                    "Expected: parent_run_id references a successful ingest_contract_incremental_audit run "
+                    "with an existing accepted_delta object.",
+                    "Fix: check parent_run_id, namespace, name and landing_s3_prefix.",
+                ],
+            ) from None
 
         return {
             "delta_object_key": delta_object_key,

@@ -138,6 +138,21 @@ def read_pipeline_checkpoint(engine: Engine, pipeline_id: str) -> dict[str, Any]
     return checkpoint
 
 
+def read_stage_audit_metrics(engine: Engine, run_id: str, stage_name: str) -> dict[str, Any] | None:
+    statement = select(stage_audit_table.c.metrics_json).where(
+        stage_audit_table.c.run_id == _parse_run_id(run_id),
+        stage_audit_table.c.stage_name == stage_name,
+        stage_audit_table.c.status == "success",
+    )
+
+    with engine.begin() as conn:
+        row = conn.execute(statement).mappings().first()
+        if row is None:
+            return None
+
+    return dict(row["metrics_json"] or {})
+
+
 def start_stage_audit(engine: Engine, run_id: str, stage_name: str) -> None:
     now = datetime.now(timezone.utc)
     statement = (

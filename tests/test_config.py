@@ -11,7 +11,6 @@ from ingestion_airflow.config import (
 from ingestion_airflow.runtime import (
     build_hashdiff_artifacts,
     build_incremental_audit_artifacts,
-    derive_incremental_audit_manifest_key,
 )
 
 
@@ -165,19 +164,49 @@ def test_incremental_config_accepts_valid_watermark_mode() -> None:
     assert config.watermark_mode == "recorded_at"
 
 
-def test_incremental_replay_config_requires_exactly_one_replay_input() -> None:
+def test_incremental_replay_config_requires_parent_run_id() -> None:
     conf = {
         "contracts_service_url": "http://contracts.local",
         "namespace": "sales",
         "name": "orders",
-        "delta_object_key": "delta/orders.ndjson.gz",
+        "target_dsn": "postgresql+psycopg2://target_user:target_pass@postgres_target:5432/target_db",
+        "target_table_curated": "curated.orders",
+        "landing_s3_bucket": "integration-landing",
+    }
+
+    with pytest.raises(ValueError, match="parent_run_id"):
+        IncrementalAuditReplayRunConfig.from_dagrun_conf(conf)
+
+
+def test_incremental_replay_config_uses_parent_run_id_only() -> None:
+    conf = {
+        "contracts_service_url": "http://contracts.local",
+        "namespace": "sales",
+        "name": "orders",
         "parent_run_id": "run-id",
         "target_dsn": "postgresql+psycopg2://target_user:target_pass@postgres_target:5432/target_db",
         "target_table_curated": "curated.orders",
         "landing_s3_bucket": "integration-landing",
     }
 
-    with pytest.raises(ValueError, match="exactly one"):
+    config = IncrementalAuditReplayRunConfig.from_dagrun_conf(conf)
+
+    assert config.parent_run_id == "run-id"
+
+
+def test_incremental_replay_config_rejects_delta_object_key() -> None:
+    conf = {
+        "contracts_service_url": "http://contracts.local",
+        "namespace": "sales",
+        "name": "orders",
+        "parent_run_id": "run-id",
+        "delta_object_key": "delta/orders.ndjson.gz",
+        "target_dsn": "postgresql+psycopg2://target_user:target_pass@postgres_target:5432/target_db",
+        "target_table_curated": "curated.orders",
+        "landing_s3_bucket": "integration-landing",
+    }
+
+    with pytest.raises(ValueError, match="delta_object_key is not supported"):
         IncrementalAuditReplayRunConfig.from_dagrun_conf(conf)
 
 
@@ -189,11 +218,3 @@ def test_build_incremental_artifacts_points_to_delta_layout() -> None:
         "validation_error_key": "sales/orders/run_id=run-123/delta/errors.ndjson.gz",
         "validation_manifest_key": "sales/orders/run_id=run-123/delta/manifest.json",
     }
-
-
-def test_derive_incremental_manifest_key_from_delta_object_key() -> None:
-    manifest_key = derive_incremental_audit_manifest_key(
-        "sales/orders/run_id=run-123/delta/accepted_delta.ndjson.gz"
-    )
-
-    assert manifest_key == "sales/orders/run_id=run-123/delta/manifest.json"

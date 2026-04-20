@@ -371,8 +371,7 @@ class IncrementalAuditReplayRunConfig:
     namespace: str
     name: str
     contract_version: str | None
-    delta_object_key: str | None
-    parent_run_id: str | None
+    parent_run_id: str
     replay_reason: str | None
     target_dsn: str
     target_table_curated: str
@@ -395,6 +394,7 @@ class IncrementalAuditReplayRunConfig:
             [
                 "namespace",
                 "name",
+                "parent_run_id",
                 "target_dsn",
                 "target_table_curated",
             ],
@@ -413,7 +413,9 @@ class IncrementalAuditReplayRunConfig:
             landing_s3_region,
             landing_s3_verify_ssl,
         ) = _parse_landing_config(conf)
-        delta_object_key, parent_run_id = _parse_replay_input(conf, "delta_object_key")
+        parent_run_id = str(conf["parent_run_id"]).strip()
+        if not parent_run_id:
+            raise ValueError("Missing required configuration values: parent_run_id")
         replay_reason = _resolve_optional(conf, "replay_reason")
 
         return cls(
@@ -422,7 +424,6 @@ class IncrementalAuditReplayRunConfig:
             namespace=str(conf["namespace"]),
             name=str(conf["name"]),
             contract_version=_parse_contract_version(conf),
-            delta_object_key=delta_object_key,
             parent_run_id=parent_run_id,
             replay_reason=replay_reason,
             target_dsn=str(conf["target_dsn"]),
