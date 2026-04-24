@@ -7,6 +7,8 @@ Airflow runtime-репозиторий для запуска DAG-ов для и�
 - replay DAG `dags/replay_contract_hashdiff_from_minio.py`
 - основной DAG `dags/ingest_contract_incremental_audit.py`
 - replay DAG `dags/replay_contract_incremental_audit_from_minio.py`
+- основной DAG `dags/ingest_contract_logical_cdc.py`
+- replay DAG `dags/replay_contract_logical_cdc_from_minio.py`
 - runtime-конфиг для чтения `dagrun.conf`
 - Docker Compose для локального запуска Airflow
 
@@ -57,7 +59,33 @@ resolve_replay_input
   -> finalize_replay
 ```
 
-Бизнес-логика hash-diff, клиент contract registry и работа с PostgreSQL вынесены в отдельный репозиторий `ingestion-core`.
+DAG `ingest_contract_logical_cdc` реализует CDC-путь через logical decoding WAL.
+Стратегия использует нативный PostgreSQL output plugin `pgoutput`; `wal2json` намеренно не используется.
+
+```text
+fetch_contract
+  -> read_checkpoint
+  -> start_run
+  -> ensure_source_logical_cdc_capture
+  -> extract_validate_land_wal_delta
+  -> apply_delta
+  -> persist_checkpoint
+  -> ack_replication_slot
+  -> finalize_run
+```
+
+DAG `replay_contract_logical_cdc_from_minio` переигрывает уже сохранённый
+`accepted_delta` из WAL CDC run-а в MinIO/S3:
+
+```text
+resolve_replay_input
+  -> fetch_contract
+  -> start_replay_run
+  -> apply_delta_replay
+  -> finalize_replay
+```
+
+Бизнес-логика стратегий, клиент contract registry и работа с PostgreSQL вынесены в отдельный репозиторий `ingestion-core`.
 
 ## Локальная структура
 
@@ -125,6 +153,41 @@ docker compose up --build -d --remove-orphans
 Пример `dag_run.conf` для replay DAG лежит в `docker/dag_run.hashdiff.replay.example.json`.
 Пример `dag_run.conf` для incremental DAG лежит в `docker/dag_run.incremental_audit.orders.example.json`.
 Пример `dag_run.conf` для replay incremental DAG лежит в `docker/dag_run.incremental_audit.replay.example.json`.
+Пример `dag_run.conf` для logical CDC DAG лежит в `docker/dag_run.logical_cdc.orders.example.json`.
+Пример `dag_run.conf` для replay logical CDC DAG лежит в `docker/dag_run.logical_cdc.replay.example.json`.
+
+## Logical CDC через WAL
+
+`ingest_contract_logical_cdc` читает изменения из PostgreSQL logical replication slot:
+
+- `source_dsn` используется для обычных SQL-запросов, например фиксации `window_end_lsn`
+- `source_replication_dsn` используется напрямую `psycopg2` replication connection; указывай формат `postgresql://...`, без `+psycopg2`
+- `source_admin_dsn` нужен только при `auto_setup_logical_cdc=true` для проверки настроек, создания publication/slot и настройки `REPLICA IDENTITY`
+- `output_plugin` должен быть `pgoutput`
+- `auto_configure_wal_settings=true` разрешает DAG-у выполнить `ALTER SYSTEM SET ...` для WAL-настроек через `source_admin_dsn`
+- `idle_timeout_seconds` опционально завершает WAL extract раньше, если replication stream молчит указанное число секунд
+- `parent_run_id` в replay должен быть `run_id` успешного `ingest_contract_logical_cdc` из `ingestion_meta.run_audit`
+
+Для автоматической настройки источника PostgreSQL должен иметь:
+
+- `wal_level=logical`
+- `max_replication_slots > 0`
+- `max_wal_senders > 0`
+- права на `CREATE PUBLICATION`, `pg_create_logical_replication_slot` и `ALTER TABLE ... REPLICA IDENTITY`
+
+Если `auto_configure_wal_settings=true` и текущие WAL-настройки не подходят, DAG запишет:
+
+- `wal_level=logical`
+- `max_replication_slots=<desired_max_replication_slots>`
+- `max_wal_senders=<desired_max_wal_senders>`
+
+После этого DAG остановится с ошибкой, потому что эти параметры требуют restart source PostgreSQL.
+После restart нужно запустить `ingest_contract_logical_cdc` повторно. Если у `source_admin_dsn`
+нет прав на `ALTER SYSTEM`, DAG остановится с ошибкой о недостатке прав и списком настроек,
+которые нужно применить вручную.
+
+Если ключевые поля таблицы не покрыты primary key/unique replica identity, используй
+`replica_identity_mode=full`, иначе DELETE/UPDATE старого ключа может быть невозможно восстановить корректно.
 
 Для Airflow `3.x` с `LocalExecutor` внешний URL и внутренний execution API должны быть разведены:
 - `AIRFLOW__API__BASE_URL=http://localhost:8088`

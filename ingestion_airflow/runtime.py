@@ -130,3 +130,13 @@ def build_incremental_audit_artifacts(namespace: str, name: str, run_id: str) ->
         "validation_error_key": f"{delta_base_key}/errors.ndjson.gz",
         "validation_manifest_key": f"{delta_base_key}/manifest.json",
     }
+
+
+def build_logical_cdc_artifacts(namespace: str, name: str, run_id: str) -> dict[str, str]:
+    base_key = f"{namespace}/{name}/run_id={run_id}"
+    delta_base_key = f"{base_key}/wal_delta"
+    return {
+        "delta_object_key": f"{delta_base_key}/accepted_delta.ndjson.gz",
+        "validation_error_key": f"{delta_base_key}/errors.ndjson.gz",
+        "validation_manifest_key": f"{delta_base_key}/manifest.json",
+    }

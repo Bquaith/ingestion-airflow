@@ -6,6 +6,8 @@ from typing import Any, Mapping
 
 
 _WATERMARK_MODES = {"auto", "commit_timestamp", "recorded_at"}
+_LOGICAL_CDC_OUTPUT_PLUGINS = {"pgoutput"}
+_REPLICA_IDENTITY_MODES = {"default", "full"}
 
 
 def _parse_bool(value: Any, field_name: str) -> bool:
@@ -389,6 +391,8 @@ class IncrementalAuditReplayRunConfig:
 
     @classmethod
     def from_dagrun_conf(cls, conf: Mapping[str, Any]) -> "IncrementalAuditReplayRunConfig":
+        if _resolve_optional(conf, "delta_object_key"):
+            raise ValueError("delta_object_key is not supported; use parent_run_id")
         _require_fields(
             conf,
             [
@@ -426,6 +430,219 @@ class IncrementalAuditReplayRunConfig:
             contract_version=_parse_contract_version(conf),
             parent_run_id=parent_run_id,
             replay_reason=replay_reason,
+            target_dsn=str(conf["target_dsn"]),
+            target_table_curated=str(conf["target_table_curated"]),
+            landing_s3_bucket=landing_s3_bucket,
+            landing_s3_prefix=landing_s3_prefix,
+            landing_s3_endpoint_url=landing_s3_endpoint_url,
+            landing_s3_region=landing_s3_region,
+            landing_s3_verify_ssl=landing_s3_verify_ssl,
+            apply_load_batch_size=batch_sizes["apply_load_batch_size"],
+            upsert_batch_size=batch_sizes["upsert_batch_size"],
+        )
+
+
+@dataclass(frozen=True)
+class LogicalCdcRunConfig:
+    contracts_service_url: str
+    audit_dsn: str
+    namespace: str
+    name: str
+    contract_version: str | None
+    source_dsn: str
+    source_replication_dsn: str
+    source_admin_dsn: str | None
+    source_table: str
+    source_publication_name: str
+    source_slot_name: str
+    output_plugin: str
+    target_dsn: str
+    target_table_curated: str
+    landing_s3_bucket: str
+    landing_s3_prefix: str
+    landing_s3_endpoint_url: str | None
+    landing_s3_region: str | None
+    landing_s3_verify_ssl: bool
+    auto_setup_logical_cdc: bool
+    auto_configure_wal_settings: bool
+    replace_existing_publication: bool
+    create_slot_if_missing: bool
+    replica_identity_mode: str
+    desired_max_replication_slots: int
+    desired_max_wal_senders: int
+    max_extract_seconds: int
+    idle_timeout_seconds: int | None
+    apply_load_batch_size: int
+    upsert_batch_size: int
+
+    @property
+    def pipeline_id(self) -> str:
+        return f"{self.namespace}.{self.name}"
+
+    @classmethod
+    def from_dagrun_conf(cls, conf: Mapping[str, Any]) -> "LogicalCdcRunConfig":
+        _require_fields(
+            conf,
+            [
+                "namespace",
+                "name",
+                "source_dsn",
+                "source_replication_dsn",
+                "source_table",
+                "source_publication_name",
+                "source_slot_name",
+                "target_dsn",
+                "target_table_curated",
+            ],
+        )
+        batch_sizes = _parse_positive_ints(
+            conf,
+            {
+                "max_extract_seconds": 30,
+                "apply_load_batch_size": 1000,
+                "upsert_batch_size": 1000,
+                "desired_max_replication_slots": 10,
+                "desired_max_wal_senders": 10,
+            },
+        )
+        (
+            landing_s3_bucket,
+            landing_s3_prefix,
+            landing_s3_endpoint_url,
+            landing_s3_region,
+            landing_s3_verify_ssl,
+        ) = _parse_landing_config(conf)
+        output_plugin = _resolve_optional(conf, "output_plugin") or "pgoutput"
+        if output_plugin not in _LOGICAL_CDC_OUTPUT_PLUGINS:
+            raise ValueError("output_plugin must be 'pgoutput'; wal2json is not supported")
+        replica_identity_mode = _resolve_optional(conf, "replica_identity_mode") or "default"
+        if replica_identity_mode not in _REPLICA_IDENTITY_MODES:
+            raise ValueError("replica_identity_mode must be one of: default, full")
+
+        auto_setup_logical_cdc = _parse_bool(
+            conf.get("auto_setup_logical_cdc", "false"),
+            "auto_setup_logical_cdc",
+        )
+        source_admin_dsn = _resolve_optional(conf, "source_admin_dsn", "SOURCE_ADMIN_DSN")
+        if auto_setup_logical_cdc and not source_admin_dsn:
+            raise ValueError("Missing required configuration values: source_admin_dsn or SOURCE_ADMIN_DSN")
+
+        source_replication_dsn = str(conf["source_replication_dsn"]).strip()
+        if source_replication_dsn.startswith("postgresql+"):
+            raise ValueError(
+                "source_replication_dsn must use psycopg2 DSN format postgresql://..., "
+                "not SQLAlchemy driver URL"
+            )
+        idle_timeout_seconds_value = _resolve_optional(conf, "idle_timeout_seconds")
+        idle_timeout_seconds = int(idle_timeout_seconds_value) if idle_timeout_seconds_value is not None else None
+        if idle_timeout_seconds is not None and idle_timeout_seconds <= 0:
+            raise ValueError("idle_timeout_seconds must be greater than zero")
+
+        return cls(
+            contracts_service_url=_resolve_required(conf, "contracts_service_url", "CONTRACTS_SERVICE_URL"),
+            audit_dsn=_resolve_required({}, "AUDIT_DATABASE_DSN", "AUDIT_DATABASE_DSN"),
+            namespace=str(conf["namespace"]),
+            name=str(conf["name"]),
+            contract_version=_parse_contract_version(conf),
+            source_dsn=str(conf["source_dsn"]),
+            source_replication_dsn=source_replication_dsn,
+            source_admin_dsn=source_admin_dsn,
+            source_table=str(conf["source_table"]),
+            source_publication_name=str(conf["source_publication_name"]),
+            source_slot_name=str(conf["source_slot_name"]),
+            output_plugin=output_plugin,
+            target_dsn=str(conf["target_dsn"]),
+            target_table_curated=str(conf["target_table_curated"]),
+            landing_s3_bucket=landing_s3_bucket,
+            landing_s3_prefix=landing_s3_prefix,
+            landing_s3_endpoint_url=landing_s3_endpoint_url,
+            landing_s3_region=landing_s3_region,
+            landing_s3_verify_ssl=landing_s3_verify_ssl,
+            auto_setup_logical_cdc=auto_setup_logical_cdc,
+            auto_configure_wal_settings=_parse_bool(
+                conf.get("auto_configure_wal_settings", "false"),
+                "auto_configure_wal_settings",
+            ),
+            replace_existing_publication=_parse_bool(
+                conf.get("replace_existing_publication", "false"),
+                "replace_existing_publication",
+            ),
+            create_slot_if_missing=_parse_bool(
+                conf.get("create_slot_if_missing", "true"),
+                "create_slot_if_missing",
+            ),
+            replica_identity_mode=replica_identity_mode,
+            desired_max_replication_slots=batch_sizes["desired_max_replication_slots"],
+            desired_max_wal_senders=batch_sizes["desired_max_wal_senders"],
+            max_extract_seconds=batch_sizes["max_extract_seconds"],
+            idle_timeout_seconds=idle_timeout_seconds,
+            apply_load_batch_size=batch_sizes["apply_load_batch_size"],
+            upsert_batch_size=batch_sizes["upsert_batch_size"],
+        )
+
+
+@dataclass(frozen=True)
+class LogicalCdcReplayRunConfig:
+    contracts_service_url: str
+    audit_dsn: str
+    namespace: str
+    name: str
+    contract_version: str | None
+    parent_run_id: str
+    replay_reason: str | None
+    target_dsn: str
+    target_table_curated: str
+    landing_s3_bucket: str
+    landing_s3_prefix: str
+    landing_s3_endpoint_url: str | None
+    landing_s3_region: str | None
+    landing_s3_verify_ssl: bool
+    apply_load_batch_size: int
+    upsert_batch_size: int
+
+    @property
+    def pipeline_id(self) -> str:
+        return f"{self.namespace}.{self.name}"
+
+    @classmethod
+    def from_dagrun_conf(cls, conf: Mapping[str, Any]) -> "LogicalCdcReplayRunConfig":
+        if _resolve_optional(conf, "delta_object_key"):
+            raise ValueError("delta_object_key is not supported; use parent_run_id")
+        _require_fields(
+            conf,
+            [
+                "namespace",
+                "name",
+                "parent_run_id",
+                "target_dsn",
+                "target_table_curated",
+            ],
+        )
+        batch_sizes = _parse_positive_ints(
+            conf,
+            {
+                "apply_load_batch_size": 1000,
+                "upsert_batch_size": 1000,
+            },
+        )
+        (
+            landing_s3_bucket,
+            landing_s3_prefix,
+            landing_s3_endpoint_url,
+            landing_s3_region,
+            landing_s3_verify_ssl,
+        ) = _parse_landing_config(conf)
+        parent_run_id = str(conf["parent_run_id"]).strip()
+        if not parent_run_id:
+            raise ValueError("Missing required configuration values: parent_run_id")
+        return cls(
+            contracts_service_url=_resolve_required(conf, "contracts_service_url", "CONTRACTS_SERVICE_URL"),
+            audit_dsn=_resolve_required({}, "AUDIT_DATABASE_DSN", "AUDIT_DATABASE_DSN"),
+            namespace=str(conf["namespace"]),
+            name=str(conf["name"]),
+            contract_version=_parse_contract_version(conf),
+            parent_run_id=parent_run_id,
+            replay_reason=_resolve_optional(conf, "replay_reason"),
             target_dsn=str(conf["target_dsn"]),
             target_table_curated=str(conf["target_table_curated"]),
             landing_s3_bucket=landing_s3_bucket,
