@@ -305,6 +305,7 @@ def ingest_contract_incremental_audit() -> None:
                 "target_table_curated": config.target_table_curated,
                 "delta_object_key": delta_result.get("delta_object_key"),
                 "validation_error_object_key": delta_result.get("error_object_key"),
+                "invalid_event_count": delta_result.get("invalid_event_count"),
                 "window_start": delta_result.get("window_start"),
                 "window_end": delta_result.get("window_end"),
                 "last_applied_watermark": delta_result.get("window_end") or run_context.get("start_watermark"),
@@ -367,7 +368,16 @@ def ingest_contract_incremental_audit() -> None:
                 insert_count=int(apply_result.get("insert_count", 0) or 0),
                 update_count=int(apply_result.get("update_count", 0) or 0),
                 unchanged_count=int(apply_result.get("unchanged_count", 0) or 0),
-                metrics_json=apply_result,
+                metrics_json={
+                    **apply_result,
+                    "source_event_count": delta_result.get("source_event_count"),
+                    "invalid_event_count": delta_result.get("invalid_event_count"),
+                    "validation_error_object_key": delta_result.get("error_object_key"),
+                    "delta_object_key": delta_result.get("delta_object_key"),
+                    "window_start": delta_result.get("window_start"),
+                    "window_end": delta_result.get("window_end"),
+                    "checkpoint_persisted": bool(checkpoint_result),
+                },
                 error_text=None,
             )
         finally:
