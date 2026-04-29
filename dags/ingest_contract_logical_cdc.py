@@ -35,6 +35,7 @@ from ingestion_core.strategies.logical_cdc import (
     checkpoint_lsn_from_payload,
     ensure_source_logical_cdc_capture,
     extract_validate_land_wal_delta,
+    resolve_checkpoint_lsn,
 )
 
 PIPELINE_TASK_IDS = [
@@ -244,11 +245,10 @@ def ingest_contract_logical_cdc() -> None:
         contract = ContractDefinition.from_registry_payload(contract_payload)
 
         def _persist() -> dict[str, Any]:
-            last_applied_lsn = (
-                apply_result.get("last_applied_lsn")
-                or delta_result.get("last_decoded_lsn")
-                or delta_result.get("window_end_lsn")
-                or run_context.get("start_lsn")
+            last_applied_lsn = resolve_checkpoint_lsn(
+                start_lsn=str(run_context.get("start_lsn") or "").strip() or None,
+                delta_result=delta_result,
+                apply_result=apply_result,
             )
             checkpoint_payload = {
                 "status": "success",
@@ -266,6 +266,10 @@ def ingest_contract_logical_cdc() -> None:
                 "target_table_curated": config.target_table_curated,
                 "delta_object_key": delta_result.get("delta_object_key"),
                 "validation_error_object_key": delta_result.get("error_object_key"),
+                "invalid_event_count": delta_result.get("invalid_event_count"),
+                "invalid_transaction_count": delta_result.get("invalid_transaction_count"),
+                "quarantined_event_count": delta_result.get("quarantined_event_count"),
+                "quarantined_transaction_count": delta_result.get("quarantined_transaction_count"),
                 "last_applied_lsn": last_applied_lsn,
                 "last_flushed_lsn": last_applied_lsn,
                 "extract_validate_land_wal_delta": delta_result,
@@ -328,11 +332,23 @@ def ingest_contract_logical_cdc() -> None:
                 audit_engine,
                 str(run_context["run_id"]),
                 "success",
-                int(apply_result.get("read_count", 0) or 0),
+                int(delta_result.get("source_event_count", 0) or apply_result.get("read_count", 0) or 0),
                 int(apply_result.get("insert_count", 0) or 0),
                 int(apply_result.get("update_count", 0) or 0),
                 int(apply_result.get("unchanged_count", 0) or 0),
-                apply_result,
+                {
+                    **apply_result,
+                    "source_event_count": delta_result.get("source_event_count"),
+                    "invalid_event_count": delta_result.get("invalid_event_count"),
+                    "invalid_transaction_count": delta_result.get("invalid_transaction_count"),
+                    "quarantined_event_count": delta_result.get("quarantined_event_count"),
+                    "quarantined_transaction_count": delta_result.get("quarantined_transaction_count"),
+                    "validation_error_object_key": delta_result.get("error_object_key"),
+                    "delta_object_key": delta_result.get("delta_object_key"),
+                    "window_start_lsn": delta_result.get("window_start_lsn"),
+                    "window_end_lsn": delta_result.get("window_end_lsn"),
+                    "last_decoded_lsn": delta_result.get("last_decoded_lsn"),
+                },
                 None,
             )
         finally:
