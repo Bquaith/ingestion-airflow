@@ -124,6 +124,10 @@ def _parse_watermark_mode(conf: Mapping[str, Any]) -> str:
     return value
 
 
+def _build_pipeline_id(namespace: str, name: str, strategy: str) -> str:
+    return f"{namespace}.{name}.{strategy}"
+
+
 @dataclass(frozen=True)
 class IngestionRunConfig:
     contracts_service_url: str
@@ -146,7 +150,7 @@ class IngestionRunConfig:
 
     @property
     def pipeline_id(self) -> str:
-        return f"{self.namespace}.{self.name}"
+        return _build_pipeline_id(self.namespace, self.name, "hash_diff")
 
     @classmethod
     def from_dagrun_conf(cls, conf: Mapping[str, Any]) -> "IngestionRunConfig":
@@ -221,7 +225,7 @@ class ReplayRunConfig:
 
     @property
     def pipeline_id(self) -> str:
-        return f"{self.namespace}.{self.name}"
+        return _build_pipeline_id(self.namespace, self.name, "hash_diff")
 
     @classmethod
     def from_dagrun_conf(cls, conf: Mapping[str, Any]) -> "ReplayRunConfig":
@@ -301,7 +305,7 @@ class IncrementalAuditRunConfig:
 
     @property
     def pipeline_id(self) -> str:
-        return f"{self.namespace}.{self.name}"
+        return _build_pipeline_id(self.namespace, self.name, "incremental_audit")
 
     @classmethod
     def from_dagrun_conf(cls, conf: Mapping[str, Any]) -> "IncrementalAuditRunConfig":
@@ -387,7 +391,7 @@ class IncrementalAuditReplayRunConfig:
 
     @property
     def pipeline_id(self) -> str:
-        return f"{self.namespace}.{self.name}"
+        return _build_pipeline_id(self.namespace, self.name, "incremental_audit")
 
     @classmethod
     def from_dagrun_conf(cls, conf: Mapping[str, Any]) -> "IncrementalAuditReplayRunConfig":
@@ -477,7 +481,7 @@ class LogicalCdcRunConfig:
 
     @property
     def pipeline_id(self) -> str:
-        return f"{self.namespace}.{self.name}"
+        return _build_pipeline_id(self.namespace, self.name, "logical_cdc")
 
     @classmethod
     def from_dagrun_conf(cls, conf: Mapping[str, Any]) -> "LogicalCdcRunConfig":
@@ -525,7 +529,9 @@ class LogicalCdcRunConfig:
         )
         source_admin_dsn = _resolve_optional(conf, "source_admin_dsn", "SOURCE_ADMIN_DSN")
         if auto_setup_logical_cdc and not source_admin_dsn:
-            raise ValueError("Missing required configuration values: source_admin_dsn or SOURCE_ADMIN_DSN")
+            raise ValueError(
+                "Missing required configuration values: source_admin_dsn or SOURCE_ADMIN_DSN"
+            )
 
         source_replication_dsn = str(conf["source_replication_dsn"]).strip()
         if source_replication_dsn.startswith("postgresql+"):
@@ -602,7 +608,7 @@ class LogicalCdcReplayRunConfig:
 
     @property
     def pipeline_id(self) -> str:
-        return f"{self.namespace}.{self.name}"
+        return _build_pipeline_id(self.namespace, self.name, "logical_cdc")
 
     @classmethod
     def from_dagrun_conf(cls, conf: Mapping[str, Any]) -> "LogicalCdcReplayRunConfig":
