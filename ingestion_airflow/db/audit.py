@@ -24,6 +24,8 @@ def _parse_run_id(run_id: str) -> uuid.UUID:
 def start_run_audit(
     engine: Engine,
     pipeline_id: str,
+    strategy: str,
+    run_mode: str,
     contract_id: str,
     version: str,
     checksum: str,
@@ -33,6 +35,8 @@ def start_run_audit(
     statement = insert(run_audit_table).values(
         run_id=run_id,
         pipeline_id=pipeline_id,
+        strategy=strategy,
+        run_mode=run_mode,
         contract_id=contract_id,
         version=version,
         checksum=checksum,
@@ -215,6 +219,7 @@ def finish_run_audit(
     read_count: int,
     insert_count: int,
     update_count: int,
+    delete_count: int,
     unchanged_count: int,
     metrics_json: Mapping[str, Any] | None = None,
     error_text: str | None = None,
@@ -227,6 +232,7 @@ def finish_run_audit(
             read_count=read_count,
             insert_count=insert_count,
             update_count=update_count,
+            delete_count=delete_count,
             unchanged_count=unchanged_count,
             status=status,
             metrics_json=dict(metrics_json or {}),
@@ -243,6 +249,8 @@ def finalize_pipeline_state(engine: Engine, pipeline_id: str) -> None:
         select(
             run_audit_table.c.started_at,
             run_audit_table.c.finished_at,
+            run_audit_table.c.strategy,
+            run_audit_table.c.run_mode,
             run_audit_table.c.status,
             run_audit_table.c.error_text,
         )

@@ -21,6 +21,12 @@ from ingestion_airflow.db.audit import (
     start_run_audit,
     start_stage_audit,
 )
+from ingestion_airflow.observability import (
+    build_application_name,
+    enrich_metrics_payload,
+    has_artifact_keys,
+    with_application_name,
+)
 from ingestion_airflow.runtime import (
     build_contracts_token_provider,
     build_hashdiff_artifacts,
@@ -45,6 +51,8 @@ PIPELINE_TASK_IDS = [
 ]
 
 logger = logging.getLogger(__name__)
+STRATEGY = "hash_diff"
+RUN_MODE = "ingest"
 
 
 @dag(
@@ -86,22 +94,31 @@ def ingest_contract_hashdiff() -> None:
             logger.info("Stage %s started for run_id=%s pipeline_id=%s", stage_name, run_id, config.pipeline_id)
             start_stage_audit(audit_engine, run_id, stage_name)
             result = action()
+            metrics_payload = enrich_metrics_payload(
+                payload=result,
+                strategy=STRATEGY,
+                run_mode=RUN_MODE,
+                pipeline_id=config.pipeline_id,
+                run_id=run_id,
+                stage_name=stage_name,
+                object_store_config=build_object_store_config(config) if has_artifact_keys(result) else None,
+            )
             logger.info(
                 "Stage %s succeeded for run_id=%s pipeline_id=%s result=%s",
                 stage_name,
                 run_id,
                 config.pipeline_id,
-                result,
+                metrics_payload,
             )
             finish_stage_audit(
                 audit_engine,
                 run_id=run_id,
                 stage_name=stage_name,
                 status="success",
-                metrics_json=result,
+                metrics_json=metrics_payload,
                 error_text=None,
             )
-            return result
+            return metrics_payload
         except Exception as exc:
             logger.exception(
                 "Stage %s failed for run_id=%s pipeline_id=%s: %s",
@@ -110,12 +127,24 @@ def ingest_contract_hashdiff() -> None:
                 config.pipeline_id,
                 exc,
             )
+            failure_payload = enrich_metrics_payload(
+                payload={
+                    "status": "failed",
+                    "exception_class": exc.__class__.__name__,
+                    "error_message": str(exc),
+                },
+                strategy=STRATEGY,
+                run_mode=RUN_MODE,
+                pipeline_id=config.pipeline_id,
+                run_id=run_id,
+                stage_name=stage_name,
+            )
             finish_stage_audit(
                 audit_engine,
                 run_id=run_id,
                 stage_name=stage_name,
                 status="failed",
-                metrics_json=None,
+                metrics_json=failure_payload,
                 error_text=str(exc),
             )
             raise
@@ -159,6 +188,8 @@ def ingest_contract_hashdiff() -> None:
         run_id = start_run_audit(
             engine=audit_engine,
             pipeline_id=config.pipeline_id,
+            strategy=STRATEGY,
+            run_mode=RUN_MODE,
             contract_id=str(contract_payload.get("contract_id", "unknown-contract")),
             version=str(contract_payload.get("version", "unknown-version")),
             checksum=str(contract_payload.get("checksum", "unknown-checksum")),
@@ -184,8 +215,15 @@ def ingest_contract_hashdiff() -> None:
                 read_count=0,
                 insert_count=0,
                 update_count=0,
+                delete_count=0,
                 unchanged_count=0,
-                metrics_json={"failed_stage": "start_run"},
+                metrics_json=enrich_metrics_payload(
+                    payload={"failed_stage": "start_run"},
+                    strategy=STRATEGY,
+                    run_mode=RUN_MODE,
+                    pipeline_id=config.pipeline_id,
+                    run_id=run_id,
+                ),
                 error_text=str(exc),
             )
             if lock_acquired:
@@ -208,7 +246,15 @@ def ingest_contract_hashdiff() -> None:
             run_context["run_id"],
             "extract_validate_land",
             lambda: extract_validate_land_snapshot(
-                source_dsn=config.source_dsn,
+                source_dsn=with_application_name(
+                    config.source_dsn,
+                    build_application_name(
+                        strategy=STRATEGY,
+                        run_mode=RUN_MODE,
+                        stage_name="extract_validate_land",
+                        role="source",
+                    ),
+                ),
                 source_table=config.source_table,
                 contract=contract,
                 object_store_config=object_store_config,
@@ -231,7 +277,15 @@ def ingest_contract_hashdiff() -> None:
 
         def _merge() -> dict[str, Any]:
             result = merge_accepted_snapshot_to_curated(
-                target_dsn=config.target_dsn,
+                target_dsn=with_application_name(
+                    config.target_dsn,
+                    build_application_name(
+                        strategy=STRATEGY,
+                        run_mode=RUN_MODE,
+                        stage_name="merge_curated",
+                        role="lake",
+                    ),
+                ),
                 target_table_curated=config.target_table_curated,
                 contract=contract,
                 object_store_config=object_store_config,
@@ -321,15 +375,39 @@ def ingest_contract_hashdiff() -> None:
                     read_count=int(accepted_result.get("source_row_count", 0) or 0),
                     insert_count=int(merge_result.get("insert_count", 0) or 0),
                     update_count=int(merge_result.get("update_count", 0) or 0),
+                    delete_count=int(merge_result.get("delete_count", 0) or 0),
                     unchanged_count=int(merge_result.get("unchanged_count", 0) or 0),
-                    metrics_json={
-                        "failed_tasks": failed_tasks,
-                        "checkpoint_persisted": bool(checkpoint_result),
-                    },
+                    metrics_json=enrich_metrics_payload(
+                        payload={
+                            "failed_tasks": failed_tasks,
+                            "checkpoint_persisted": bool(checkpoint_result),
+                            "accepted_object_key": accepted_result.get("accepted_object_key"),
+                            "validation_error_object_key": accepted_result.get("error_object_key"),
+                        },
+                        strategy=STRATEGY,
+                        run_mode=RUN_MODE,
+                        pipeline_id=config.pipeline_id,
+                        run_id=str(run_context["run_id"]),
+                        object_store_config=build_object_store_config(config),
+                    ),
                     error_text=f"Pipeline failed at stages: {', '.join(failed_tasks)}",
                 )
                 raise AirflowFailException(f"Pipeline failed at tasks: {', '.join(failed_tasks)}")
             else:
+                run_metrics = enrich_metrics_payload(
+                    payload={
+                        **merge_result,
+                        "checkpoint_persisted": bool(checkpoint_result),
+                        "accepted_object_key": accepted_result.get("accepted_object_key"),
+                        "validation_error_object_key": accepted_result.get("error_object_key"),
+                        "validation_manifest_key": accepted_result.get("manifest_key"),
+                    },
+                    strategy=STRATEGY,
+                    run_mode=RUN_MODE,
+                    pipeline_id=config.pipeline_id,
+                    run_id=str(run_context["run_id"]),
+                    object_store_config=build_object_store_config(config),
+                )
                 finish_run_audit(
                     engine=audit_engine,
                     run_id=str(run_context["run_id"]),
@@ -337,8 +415,9 @@ def ingest_contract_hashdiff() -> None:
                     read_count=int(merge_result.get("read_count", 0) or 0),
                     insert_count=int(merge_result.get("insert_count", 0) or 0),
                     update_count=int(merge_result.get("update_count", 0) or 0),
+                    delete_count=int(merge_result.get("delete_count", 0) or 0),
                     unchanged_count=int(merge_result.get("unchanged_count", 0) or 0),
-                    metrics_json=merge_result,
+                    metrics_json=run_metrics,
                     error_text=None,
                 )
         finally:

@@ -19,6 +19,12 @@ from ingestion_airflow.db.audit import (
     start_run_audit,
     start_stage_audit,
 )
+from ingestion_airflow.observability import (
+    build_application_name,
+    enrich_metrics_payload,
+    has_artifact_keys,
+    with_application_name,
+)
 from ingestion_airflow.runtime import (
     build_contracts_token_provider,
     build_hashdiff_artifacts,
@@ -35,6 +41,8 @@ REPLAY_STAGE_TASK_IDS = [
 ]
 
 logger = logging.getLogger(__name__)
+STRATEGY = "hash_diff"
+RUN_MODE = "replay"
 
 
 def _derive_validation_manifest_key(accepted_object_key: str) -> str | None:
@@ -70,22 +78,31 @@ def replay_contract_hashdiff_from_minio() -> None:
             logger.info("Replay stage %s started for run_id=%s pipeline_id=%s", stage_name, run_id, config.pipeline_id)
             start_stage_audit(audit_engine, run_id, stage_name)
             result = action()
+            metrics_payload = enrich_metrics_payload(
+                payload=result,
+                strategy=STRATEGY,
+                run_mode=RUN_MODE,
+                pipeline_id=config.pipeline_id,
+                run_id=run_id,
+                stage_name=stage_name,
+                object_store_config=build_object_store_config(config) if has_artifact_keys(result) else None,
+            )
             logger.info(
                 "Replay stage %s succeeded for run_id=%s pipeline_id=%s result=%s",
                 stage_name,
                 run_id,
                 config.pipeline_id,
-                result,
+                metrics_payload,
             )
             finish_stage_audit(
                 audit_engine,
                 run_id=run_id,
                 stage_name=stage_name,
                 status="success",
-                metrics_json=result,
+                metrics_json=metrics_payload,
                 error_text=None,
             )
-            return result
+            return metrics_payload
         except Exception as exc:
             logger.exception(
                 "Replay stage %s failed for run_id=%s pipeline_id=%s: %s",
@@ -94,12 +111,24 @@ def replay_contract_hashdiff_from_minio() -> None:
                 config.pipeline_id,
                 exc,
             )
+            failure_payload = enrich_metrics_payload(
+                payload={
+                    "status": "failed",
+                    "exception_class": exc.__class__.__name__,
+                    "error_message": str(exc),
+                },
+                strategy=STRATEGY,
+                run_mode=RUN_MODE,
+                pipeline_id=config.pipeline_id,
+                run_id=run_id,
+                stage_name=stage_name,
+            )
             finish_stage_audit(
                 audit_engine,
                 run_id=run_id,
                 stage_name=stage_name,
                 status="failed",
-                metrics_json=None,
+                metrics_json=failure_payload,
                 error_text=str(exc),
             )
             raise
@@ -171,6 +200,8 @@ def replay_contract_hashdiff_from_minio() -> None:
         run_id = start_run_audit(
             engine=audit_engine,
             pipeline_id=config.pipeline_id,
+            strategy=STRATEGY,
+            run_mode=RUN_MODE,
             contract_id=str(contract_payload.get("contract_id", "unknown-contract")),
             version=str(contract_payload.get("version", "unknown-version")),
             checksum=str(contract_payload.get("checksum", "unknown-checksum")),
@@ -205,13 +236,20 @@ def replay_contract_hashdiff_from_minio() -> None:
                 read_count=0,
                 insert_count=0,
                 update_count=0,
+                delete_count=0,
                 unchanged_count=0,
-                metrics_json={
-                    "failed_stage": "start_replay_run",
-                    "mode": "replay",
-                    "accepted_object_key": replay_input.get("accepted_object_key"),
-                    "parent_run_id": replay_input.get("parent_run_id"),
-                },
+                metrics_json=enrich_metrics_payload(
+                    payload={
+                        "failed_stage": "start_replay_run",
+                        "accepted_object_key": replay_input.get("accepted_object_key"),
+                        "parent_run_id": replay_input.get("parent_run_id"),
+                    },
+                    strategy=STRATEGY,
+                    run_mode=RUN_MODE,
+                    pipeline_id=config.pipeline_id,
+                    run_id=run_id,
+                    object_store_config=build_object_store_config(config),
+                ),
                 error_text=str(exc),
             )
             if lock_acquired:
@@ -231,7 +269,15 @@ def replay_contract_hashdiff_from_minio() -> None:
 
         def _merge() -> dict[str, Any]:
             result = merge_accepted_snapshot_to_curated(
-                target_dsn=config.target_dsn,
+                target_dsn=with_application_name(
+                    config.target_dsn,
+                    build_application_name(
+                        strategy=STRATEGY,
+                        run_mode=RUN_MODE,
+                        stage_name="merge_curated",
+                        role="lake",
+                    ),
+                ),
                 target_table_curated=config.target_table_curated,
                 contract=contract,
                 object_store_config=object_store_config,
@@ -275,19 +321,42 @@ def replay_contract_hashdiff_from_minio() -> None:
                     read_count=int(merge_result.get("read_count", 0) or 0),
                     insert_count=int(merge_result.get("insert_count", 0) or 0),
                     update_count=int(merge_result.get("update_count", 0) or 0),
+                    delete_count=int(merge_result.get("delete_count", 0) or 0),
                     unchanged_count=int(merge_result.get("unchanged_count", 0) or 0),
-                    metrics_json={
-                        "mode": "replay",
-                        "failed_tasks": failed_tasks,
-                        "accepted_object_key": run_context.get("accepted_object_key"),
-                        "parent_run_id": run_context.get("parent_run_id"),
-                        "replayed_contract_version": run_context.get("replayed_contract_version"),
-                        "replay_reason": run_context.get("replay_reason"),
-                    },
+                    metrics_json=enrich_metrics_payload(
+                        payload={
+                            "failed_tasks": failed_tasks,
+                            "accepted_object_key": run_context.get("accepted_object_key"),
+                            "validation_manifest_key": run_context.get("validation_manifest_key"),
+                            "parent_run_id": run_context.get("parent_run_id"),
+                            "replayed_contract_version": run_context.get("replayed_contract_version"),
+                            "replay_reason": run_context.get("replay_reason"),
+                        },
+                        strategy=STRATEGY,
+                        run_mode=RUN_MODE,
+                        pipeline_id=config.pipeline_id,
+                        run_id=str(run_context["run_id"]),
+                        object_store_config=build_object_store_config(config),
+                    ),
                     error_text=f"Replay failed at stages: {', '.join(failed_tasks)}",
                 )
                 raise AirflowFailException(f"Replay failed at tasks: {', '.join(failed_tasks)}")
 
+            run_metrics = enrich_metrics_payload(
+                payload={
+                    **merge_result,
+                    "accepted_object_key": run_context.get("accepted_object_key"),
+                    "validation_manifest_key": run_context.get("validation_manifest_key"),
+                    "parent_run_id": run_context.get("parent_run_id"),
+                    "replay_reason": run_context.get("replay_reason"),
+                    "replayed_contract_version": run_context.get("replayed_contract_version"),
+                },
+                strategy=STRATEGY,
+                run_mode=RUN_MODE,
+                pipeline_id=config.pipeline_id,
+                run_id=str(run_context["run_id"]),
+                object_store_config=build_object_store_config(config),
+            )
             finish_run_audit(
                 engine=audit_engine,
                 run_id=str(run_context["run_id"]),
@@ -295,16 +364,9 @@ def replay_contract_hashdiff_from_minio() -> None:
                 read_count=int(merge_result.get("read_count", 0) or 0),
                 insert_count=int(merge_result.get("insert_count", 0) or 0),
                 update_count=int(merge_result.get("update_count", 0) or 0),
+                delete_count=int(merge_result.get("delete_count", 0) or 0),
                 unchanged_count=int(merge_result.get("unchanged_count", 0) or 0),
-                metrics_json={
-                    **merge_result,
-                    "mode": "replay",
-                    "accepted_object_key": run_context.get("accepted_object_key"),
-                    "validation_manifest_key": run_context.get("validation_manifest_key"),
-                    "parent_run_id": run_context.get("parent_run_id"),
-                    "replay_reason": run_context.get("replay_reason"),
-                    "replayed_contract_version": run_context.get("replayed_contract_version"),
-                },
+                metrics_json=run_metrics,
                 error_text=None,
             )
         finally:

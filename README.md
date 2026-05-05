@@ -87,6 +87,31 @@ resolve_replay_input
 
 Бизнес-логика стратегий, клиент contract registry и работа с PostgreSQL вынесены в отдельный репозиторий `ingestion-core`.
 
+## Audit And Metrics
+
+Airflow runtime пишет операционные метрики в audit БД `dag_audit`, schema `ingestion_meta`.
+
+Основные сущности:
+
+- `run_audit` — итог метрик запуска, включая `strategy`, `run_mode`, `status`, row/event counts
+- `stage_audit` — метрики отдельных стадий DAG
+- `pipeline_checkpoint` — checkpoint стратегии
+- `pipeline_state` — последнее состояние пайплайна
+
+Для Grafana дополнительно доступны SQL view:
+
+- `ingestion_meta.v_pipeline_health`
+- `ingestion_meta.v_run_metrics`
+- `ingestion_meta.v_stage_metrics`
+- `ingestion_meta.v_problem_summary`
+
+Каждый stage/run metrics payload теперь нормализован и содержит:
+
+- `strategy`, `run_mode`, `pipeline_id`, `run_id`
+- derived ratios/throughput when available
+- `problem_summary`
+- размеры object-store артефактов, если стадия их публикует
+
 ## Локальная структура
 
 Для текущей сборки репозитории должны лежать рядом:

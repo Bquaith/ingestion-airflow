@@ -20,6 +20,12 @@ from ingestion_airflow.db.audit import (
     start_run_audit,
     start_stage_audit,
 )
+from ingestion_airflow.observability import (
+    build_application_name,
+    enrich_metrics_payload,
+    has_artifact_keys,
+    with_application_name,
+)
 from ingestion_airflow.runtime import (
     build_contracts_token_provider,
     build_logical_cdc_artifacts,
@@ -36,6 +42,8 @@ REPLAY_STAGE_TASK_IDS = [
 ]
 
 logger = logging.getLogger(__name__)
+STRATEGY = "logical_cdc"
+RUN_MODE = "replay"
 
 
 def _replay_input_error(problem: str, details: list[str]) -> AirflowFailException:
@@ -88,22 +96,31 @@ def replay_contract_logical_cdc_from_minio() -> None:
             logger.info("Replay stage %s started for run_id=%s pipeline_id=%s", stage_name, run_id, config.pipeline_id)
             start_stage_audit(audit_engine, run_id, stage_name)
             result = action()
+            metrics_payload = enrich_metrics_payload(
+                payload=result,
+                strategy=STRATEGY,
+                run_mode=RUN_MODE,
+                pipeline_id=config.pipeline_id,
+                run_id=run_id,
+                stage_name=stage_name,
+                object_store_config=build_object_store_config(config) if has_artifact_keys(result) else None,
+            )
             logger.info(
                 "Replay stage %s succeeded for run_id=%s pipeline_id=%s result=%s",
                 stage_name,
                 run_id,
                 config.pipeline_id,
-                result,
+                metrics_payload,
             )
             finish_stage_audit(
                 audit_engine,
                 run_id=run_id,
                 stage_name=stage_name,
                 status="success",
-                metrics_json=result,
+                metrics_json=metrics_payload,
                 error_text=None,
             )
-            return result
+            return metrics_payload
         except Exception as exc:
             logger.exception(
                 "Replay stage %s failed for run_id=%s pipeline_id=%s: %s",
@@ -112,12 +129,24 @@ def replay_contract_logical_cdc_from_minio() -> None:
                 config.pipeline_id,
                 exc,
             )
+            failure_payload = enrich_metrics_payload(
+                payload={
+                    "status": "failed",
+                    "exception_class": exc.__class__.__name__,
+                    "error_message": str(exc),
+                },
+                strategy=STRATEGY,
+                run_mode=RUN_MODE,
+                pipeline_id=config.pipeline_id,
+                run_id=run_id,
+                stage_name=stage_name,
+            )
             finish_stage_audit(
                 audit_engine,
                 run_id=run_id,
                 stage_name=stage_name,
                 status="failed",
-                metrics_json=None,
+                metrics_json=failure_payload,
                 error_text=str(exc),
             )
             raise
@@ -249,6 +278,8 @@ def replay_contract_logical_cdc_from_minio() -> None:
         run_id = start_run_audit(
             engine=audit_engine,
             pipeline_id=config.pipeline_id,
+            strategy=STRATEGY,
+            run_mode=RUN_MODE,
             contract_id=str(contract_payload.get("contract_id", "unknown-contract")),
             version=str(contract_payload.get("version", "unknown-version")),
             checksum=str(contract_payload.get("checksum", "unknown-checksum")),
@@ -283,13 +314,20 @@ def replay_contract_logical_cdc_from_minio() -> None:
                 read_count=0,
                 insert_count=0,
                 update_count=0,
+                delete_count=0,
                 unchanged_count=0,
-                metrics_json={
-                    "failed_stage": "start_replay_run",
-                    "mode": "logical_cdc_replay",
-                    "delta_object_key": replay_input.get("delta_object_key"),
-                    "parent_run_id": replay_input.get("parent_run_id"),
-                },
+                metrics_json=enrich_metrics_payload(
+                    payload={
+                        "failed_stage": "start_replay_run",
+                        "delta_object_key": replay_input.get("delta_object_key"),
+                        "parent_run_id": replay_input.get("parent_run_id"),
+                    },
+                    strategy=STRATEGY,
+                    run_mode=RUN_MODE,
+                    pipeline_id=config.pipeline_id,
+                    run_id=run_id,
+                    object_store_config=build_object_store_config(config),
+                ),
                 error_text=str(exc),
             )
             if lock_acquired:
@@ -309,7 +347,15 @@ def replay_contract_logical_cdc_from_minio() -> None:
 
         def _apply() -> dict[str, Any]:
             result = apply_wal_delta_to_curated(
-                target_dsn=config.target_dsn,
+                target_dsn=with_application_name(
+                    config.target_dsn,
+                    build_application_name(
+                        strategy=STRATEGY,
+                        run_mode=RUN_MODE,
+                        stage_name="apply_delta",
+                        role="lake",
+                    ),
+                ),
                 target_table_curated=config.target_table_curated,
                 contract=contract,
                 object_store_config=object_store_config,
@@ -340,17 +386,39 @@ def replay_contract_logical_cdc_from_minio() -> None:
                     read_count=int(apply_result.get("read_count", 0) or 0),
                     insert_count=int(apply_result.get("insert_count", 0) or 0),
                     update_count=int(apply_result.get("update_count", 0) or 0),
+                    delete_count=int(apply_result.get("delete_count", 0) or 0),
                     unchanged_count=int(apply_result.get("unchanged_count", 0) or 0),
-                    metrics_json={
-                        "mode": "logical_cdc_replay",
-                        "failed_tasks": failed_tasks,
-                        "delta_object_key": run_context.get("delta_object_key"),
-                        "parent_run_id": run_context.get("parent_run_id"),
-                    },
+                    metrics_json=enrich_metrics_payload(
+                        payload={
+                            "failed_tasks": failed_tasks,
+                            "delta_object_key": run_context.get("delta_object_key"),
+                            "validation_manifest_key": run_context.get("validation_manifest_key"),
+                            "parent_run_id": run_context.get("parent_run_id"),
+                        },
+                        strategy=STRATEGY,
+                        run_mode=RUN_MODE,
+                        pipeline_id=config.pipeline_id,
+                        run_id=str(run_context["run_id"]),
+                        object_store_config=build_object_store_config(config),
+                    ),
                     error_text=f"Replay pipeline failed at stages: {', '.join(failed_tasks)}",
                 )
                 raise AirflowFailException(f"Replay pipeline failed at tasks: {', '.join(failed_tasks)}")
 
+            run_metrics = enrich_metrics_payload(
+                payload={
+                    **apply_result,
+                    "delta_object_key": run_context.get("delta_object_key"),
+                    "validation_manifest_key": run_context.get("validation_manifest_key"),
+                    "parent_run_id": run_context.get("parent_run_id"),
+                    "replayed_contract_version": run_context.get("replayed_contract_version"),
+                },
+                strategy=STRATEGY,
+                run_mode=RUN_MODE,
+                pipeline_id=config.pipeline_id,
+                run_id=str(run_context["run_id"]),
+                object_store_config=build_object_store_config(config),
+            )
             finish_run_audit(
                 engine=audit_engine,
                 run_id=str(run_context["run_id"]),
@@ -358,14 +426,9 @@ def replay_contract_logical_cdc_from_minio() -> None:
                 read_count=int(apply_result.get("read_count", 0) or 0),
                 insert_count=int(apply_result.get("insert_count", 0) or 0),
                 update_count=int(apply_result.get("update_count", 0) or 0),
+                delete_count=int(apply_result.get("delete_count", 0) or 0),
                 unchanged_count=int(apply_result.get("unchanged_count", 0) or 0),
-                metrics_json={
-                    **apply_result,
-                    "mode": "logical_cdc_replay",
-                    "delta_object_key": run_context.get("delta_object_key"),
-                    "parent_run_id": run_context.get("parent_run_id"),
-                    "replayed_contract_version": run_context.get("replayed_contract_version"),
-                },
+                metrics_json=run_metrics,
                 error_text=None,
             )
         finally:

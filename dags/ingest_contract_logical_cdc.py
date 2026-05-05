@@ -21,6 +21,12 @@ from ingestion_airflow.db.audit import (
     start_run_audit,
     start_stage_audit,
 )
+from ingestion_airflow.observability import (
+    build_application_name,
+    enrich_metrics_payload,
+    has_artifact_keys,
+    with_application_name,
+)
 from ingestion_airflow.runtime import (
     build_contracts_token_provider,
     build_logical_cdc_artifacts,
@@ -50,6 +56,8 @@ PIPELINE_TASK_IDS = [
 ]
 
 logger = logging.getLogger(__name__)
+STRATEGY = "logical_cdc"
+RUN_MODE = "ingest"
 
 
 @dag(
@@ -93,12 +101,33 @@ def ingest_contract_logical_cdc() -> None:
             logger.info("Stage %s started for run_id=%s pipeline_id=%s", stage_name, run_id, config.pipeline_id)
             start_stage_audit(audit_engine, run_id, stage_name)
             result = action()
-            logger.info("Stage %s succeeded for run_id=%s result=%s", stage_name, run_id, result)
-            finish_stage_audit(audit_engine, run_id, stage_name, "success", result, None)
-            return result
+            metrics_payload = enrich_metrics_payload(
+                payload=result,
+                strategy=STRATEGY,
+                run_mode=RUN_MODE,
+                pipeline_id=config.pipeline_id,
+                run_id=run_id,
+                stage_name=stage_name,
+                object_store_config=build_object_store_config(config) if has_artifact_keys(result) else None,
+            )
+            logger.info("Stage %s succeeded for run_id=%s result=%s", stage_name, run_id, metrics_payload)
+            finish_stage_audit(audit_engine, run_id, stage_name, "success", metrics_payload, None)
+            return metrics_payload
         except Exception as exc:
             logger.exception("Stage %s failed for run_id=%s: %s", stage_name, run_id, exc)
-            finish_stage_audit(audit_engine, run_id, stage_name, "failed", None, str(exc))
+            failure_payload = enrich_metrics_payload(
+                payload={
+                    "status": "failed",
+                    "exception_class": exc.__class__.__name__,
+                    "error_message": str(exc),
+                },
+                strategy=STRATEGY,
+                run_mode=RUN_MODE,
+                pipeline_id=config.pipeline_id,
+                run_id=run_id,
+                stage_name=stage_name,
+            )
+            finish_stage_audit(audit_engine, run_id, stage_name, "failed", failure_payload, str(exc))
             raise
         finally:
             audit_engine.dispose()
@@ -125,6 +154,8 @@ def ingest_contract_logical_cdc() -> None:
         run_id = start_run_audit(
             audit_engine,
             config.pipeline_id,
+            STRATEGY,
+            RUN_MODE,
             str(contract_payload.get("contract_id", "unknown-contract")),
             str(contract_payload.get("version", "unknown-version")),
             str(contract_payload.get("checksum", "unknown-checksum")),
@@ -136,7 +167,24 @@ def ingest_contract_logical_cdc() -> None:
                 raise RuntimeError(f"Pipeline lock is already held for {config.pipeline_id}")
             return _build_run_context(config, run_id, checkpoint)
         except Exception as exc:
-            finish_run_audit(audit_engine, run_id, "failed", 0, 0, 0, 0, {"failed_stage": "start_run"}, str(exc))
+            finish_run_audit(
+                audit_engine,
+                run_id,
+                "failed",
+                0,
+                0,
+                0,
+                0,
+                0,
+                enrich_metrics_payload(
+                    payload={"failed_stage": "start_run"},
+                    strategy=STRATEGY,
+                    run_mode=RUN_MODE,
+                    pipeline_id=config.pipeline_id,
+                    run_id=run_id,
+                ),
+                str(exc),
+            )
             if lock_acquired:
                 release_pipeline_lock(audit_engine, config.pipeline_id, run_id)
             raise
@@ -162,7 +210,15 @@ def ingest_contract_logical_cdc() -> None:
             "ensure_source_logical_cdc_capture",
             lambda: {
                 **ensure_source_logical_cdc_capture(
-                    source_admin_dsn=str(config.source_admin_dsn),
+                    source_admin_dsn=with_application_name(
+                        str(config.source_admin_dsn),
+                        build_application_name(
+                            strategy=STRATEGY,
+                            run_mode=RUN_MODE,
+                            stage_name="ensure_source_logical_cdc_capture",
+                            role="source-admin",
+                        ),
+                    ),
                     source_table=config.source_table,
                     source_publication_name=config.source_publication_name,
                     source_slot_name=config.source_slot_name,
@@ -193,8 +249,24 @@ def ingest_contract_logical_cdc() -> None:
             run_context["run_id"],
             "extract_validate_land_wal_delta",
             lambda: extract_validate_land_wal_delta(
-                source_dsn=config.source_dsn,
-                source_replication_dsn=config.source_replication_dsn,
+                source_dsn=with_application_name(
+                    config.source_dsn,
+                    build_application_name(
+                        strategy=STRATEGY,
+                        run_mode=RUN_MODE,
+                        stage_name="extract_validate_land_wal_delta",
+                        role="source",
+                    ),
+                ),
+                source_replication_dsn=with_application_name(
+                    config.source_replication_dsn,
+                    build_application_name(
+                        strategy=STRATEGY,
+                        run_mode=RUN_MODE,
+                        stage_name="extract_validate_land_wal_delta",
+                        role="replication",
+                    ),
+                ),
                 source_table=config.source_table,
                 source_slot_name=config.source_slot_name,
                 source_publication_name=config.source_publication_name,
@@ -223,7 +295,15 @@ def ingest_contract_logical_cdc() -> None:
             run_context["run_id"],
             "apply_delta",
             lambda: apply_wal_delta_to_curated(
-                target_dsn=config.target_dsn,
+                target_dsn=with_application_name(
+                    config.target_dsn,
+                    build_application_name(
+                        strategy=STRATEGY,
+                        run_mode=RUN_MODE,
+                        stage_name="apply_delta",
+                        role="lake",
+                    ),
+                ),
                 target_table_curated=config.target_table_curated,
                 contract=contract,
                 object_store_config=object_store_config,
@@ -296,7 +376,15 @@ def ingest_contract_logical_cdc() -> None:
             run_context["run_id"],
             "ack_replication_slot",
             lambda: ack_logical_replication_slot(
-                source_replication_dsn=config.source_replication_dsn,
+                source_replication_dsn=with_application_name(
+                    config.source_replication_dsn,
+                    build_application_name(
+                        strategy=STRATEGY,
+                        run_mode=RUN_MODE,
+                        stage_name="ack_replication_slot",
+                        role="replication",
+                    ),
+                ),
                 source_slot_name=config.source_slot_name,
                 source_publication_name=config.source_publication_name,
                 flush_lsn=str(flush_lsn),
@@ -322,21 +410,27 @@ def ingest_contract_logical_cdc() -> None:
                     int(delta_result.get("source_event_count", 0) or 0),
                     int(apply_result.get("insert_count", 0) or 0),
                     int(apply_result.get("update_count", 0) or 0),
+                    int(apply_result.get("delete_count", 0) or 0),
                     int(apply_result.get("unchanged_count", 0) or 0),
-                    {"failed_tasks": failed_tasks},
+                    enrich_metrics_payload(
+                        payload={
+                            "failed_tasks": failed_tasks,
+                            "delta_object_key": delta_result.get("delta_object_key"),
+                            "validation_error_object_key": delta_result.get("error_object_key"),
+                            "validation_manifest_key": delta_result.get("manifest_key"),
+                        },
+                        strategy=STRATEGY,
+                        run_mode=RUN_MODE,
+                        pipeline_id=config.pipeline_id,
+                        run_id=str(run_context["run_id"]),
+                        object_store_config=build_object_store_config(config),
+                    ),
                     f"Pipeline failed at stages: {', '.join(failed_tasks)}",
                 )
                 raise AirflowFailException(f"Pipeline failed at tasks: {', '.join(failed_tasks)}")
 
-            finish_run_audit(
-                audit_engine,
-                str(run_context["run_id"]),
-                "success",
-                int(delta_result.get("source_event_count", 0) or apply_result.get("read_count", 0) or 0),
-                int(apply_result.get("insert_count", 0) or 0),
-                int(apply_result.get("update_count", 0) or 0),
-                int(apply_result.get("unchanged_count", 0) or 0),
-                {
+            run_metrics = enrich_metrics_payload(
+                payload={
                     **apply_result,
                     "source_event_count": delta_result.get("source_event_count"),
                     "invalid_event_count": delta_result.get("invalid_event_count"),
@@ -345,10 +439,27 @@ def ingest_contract_logical_cdc() -> None:
                     "quarantined_transaction_count": delta_result.get("quarantined_transaction_count"),
                     "validation_error_object_key": delta_result.get("error_object_key"),
                     "delta_object_key": delta_result.get("delta_object_key"),
+                    "validation_manifest_key": delta_result.get("manifest_key"),
                     "window_start_lsn": delta_result.get("window_start_lsn"),
                     "window_end_lsn": delta_result.get("window_end_lsn"),
                     "last_decoded_lsn": delta_result.get("last_decoded_lsn"),
                 },
+                strategy=STRATEGY,
+                run_mode=RUN_MODE,
+                pipeline_id=config.pipeline_id,
+                run_id=str(run_context["run_id"]),
+                object_store_config=build_object_store_config(config),
+            )
+            finish_run_audit(
+                audit_engine,
+                str(run_context["run_id"]),
+                "success",
+                int(delta_result.get("source_event_count", 0) or apply_result.get("read_count", 0) or 0),
+                int(apply_result.get("insert_count", 0) or 0),
+                int(apply_result.get("update_count", 0) or 0),
+                int(apply_result.get("delete_count", 0) or 0),
+                int(apply_result.get("unchanged_count", 0) or 0),
+                run_metrics,
                 None,
             )
         finally:
