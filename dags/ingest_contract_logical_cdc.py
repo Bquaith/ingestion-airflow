@@ -443,6 +443,8 @@ def ingest_contract_logical_cdc() -> None:
                     "window_start_lsn": delta_result.get("window_start_lsn"),
                     "window_end_lsn": delta_result.get("window_end_lsn"),
                     "last_decoded_lsn": delta_result.get("last_decoded_lsn"),
+                    "last_stream_wal_end_lsn": delta_result.get("last_stream_wal_end_lsn"),
+                    "reached_window_end": delta_result.get("reached_window_end"),
                 },
                 strategy=STRATEGY,
                 run_mode=RUN_MODE,
