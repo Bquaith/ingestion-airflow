@@ -17,6 +17,7 @@ from ingestion_airflow.db.audit import (
     finish_stage_audit,
     persist_pipeline_checkpoint,
     read_pipeline_checkpoint,
+    read_stage_audit_record,
     release_pipeline_lock,
     start_run_audit,
     start_stage_audit,
@@ -33,6 +34,10 @@ from ingestion_airflow.runtime import (
     build_object_store_config,
 )
 from ingestion_airflow.task_runtime import get_missing_return_value_tasks
+from ingestion_airflow.validation_error_audit import (
+    extract_validation_error_context,
+    persist_validation_errors_from_artifact,
+)
 from ingestion_core.adapters.postgres import create_sqlalchemy_engine
 from ingestion_core.contracts import ContractDefinition, ContractRegistryClient
 from ingestion_core.strategies.incremental_audit import (
@@ -136,6 +141,7 @@ def ingest_contract_incremental_audit() -> None:
                     "status": "failed",
                     "exception_class": exc.__class__.__name__,
                     "error_message": str(exc),
+                    **extract_validation_error_context(exc),
                 },
                 strategy=STRATEGY,
                 run_mode=RUN_MODE,
@@ -403,6 +409,8 @@ def ingest_contract_incremental_audit() -> None:
         delta_result = task_instance.xcom_pull(task_ids="extract_validate_land_delta") or {}
         apply_result = task_instance.xcom_pull(task_ids="apply_delta") or {}
         checkpoint_result = task_instance.xcom_pull(task_ids="persist_checkpoint_task") or {}
+        extract_stage_record = read_stage_audit_record(audit_engine, str(run_context["run_id"]), "extract_validate_land_delta")
+        extract_stage_payload = delta_result or dict((extract_stage_record or {}).get("metrics_json") or {})
 
         try:
             if failed_tasks:
@@ -410,7 +418,7 @@ def ingest_contract_incremental_audit() -> None:
                     engine=audit_engine,
                     run_id=str(run_context["run_id"]),
                     status="failed",
-                    read_count=int(delta_result.get("source_event_count", 0) or 0),
+                    read_count=int(extract_stage_payload.get("source_event_count", 0) or 0),
                     insert_count=int(apply_result.get("insert_count", 0) or 0),
                     update_count=int(apply_result.get("update_count", 0) or 0),
                     delete_count=int(apply_result.get("delete_count", 0) or 0),
@@ -419,9 +427,15 @@ def ingest_contract_incremental_audit() -> None:
                         payload={
                             "failed_tasks": failed_tasks,
                             "checkpoint_persisted": bool(checkpoint_result),
-                            "delta_object_key": delta_result.get("delta_object_key"),
-                            "validation_error_object_key": delta_result.get("error_object_key"),
-                            "validation_manifest_key": delta_result.get("manifest_key"),
+                            "delta_object_key": extract_stage_payload.get("delta_object_key"),
+                            "validation_error_object_key": (
+                                extract_stage_payload.get("validation_error_object_key")
+                                or extract_stage_payload.get("error_object_key")
+                            ),
+                            "validation_manifest_key": (
+                                extract_stage_payload.get("validation_manifest_key")
+                                or extract_stage_payload.get("manifest_key")
+                            ),
                         },
                         strategy=STRATEGY,
                         run_mode=RUN_MODE,
@@ -431,18 +445,34 @@ def ingest_contract_incremental_audit() -> None:
                     ),
                     error_text=f"Pipeline failed at stages: {', '.join(failed_tasks)}",
                 )
+                persist_validation_errors_from_artifact(
+                    engine=audit_engine,
+                    object_store_config=build_object_store_config(config),
+                    run_id=str(run_context["run_id"]),
+                    pipeline_id=config.pipeline_id,
+                    strategy=STRATEGY,
+                    run_mode=RUN_MODE,
+                    stage_name="extract_validate_land_delta",
+                    stage_payload=extract_stage_payload,
+                )
                 raise AirflowFailException(f"Pipeline failed at tasks: {', '.join(failed_tasks)}")
 
             run_metrics = enrich_metrics_payload(
                 payload={
                     **apply_result,
-                    "source_event_count": delta_result.get("source_event_count"),
-                    "invalid_event_count": delta_result.get("invalid_event_count"),
-                    "validation_error_object_key": delta_result.get("error_object_key"),
-                    "delta_object_key": delta_result.get("delta_object_key"),
-                    "validation_manifest_key": delta_result.get("manifest_key"),
-                    "window_start": delta_result.get("window_start"),
-                    "window_end": delta_result.get("window_end"),
+                    "source_event_count": extract_stage_payload.get("source_event_count"),
+                    "invalid_event_count": extract_stage_payload.get("invalid_event_count"),
+                    "validation_error_object_key": (
+                        extract_stage_payload.get("validation_error_object_key")
+                        or extract_stage_payload.get("error_object_key")
+                    ),
+                    "delta_object_key": extract_stage_payload.get("delta_object_key"),
+                    "validation_manifest_key": (
+                        extract_stage_payload.get("validation_manifest_key")
+                        or extract_stage_payload.get("manifest_key")
+                    ),
+                    "window_start": extract_stage_payload.get("window_start"),
+                    "window_end": extract_stage_payload.get("window_end"),
                     "checkpoint_persisted": bool(checkpoint_result),
                 },
                 strategy=STRATEGY,
@@ -462,6 +492,16 @@ def ingest_contract_incremental_audit() -> None:
                 unchanged_count=int(apply_result.get("unchanged_count", 0) or 0),
                 metrics_json=run_metrics,
                 error_text=None,
+            )
+            persist_validation_errors_from_artifact(
+                engine=audit_engine,
+                object_store_config=build_object_store_config(config),
+                run_id=str(run_context["run_id"]),
+                pipeline_id=config.pipeline_id,
+                strategy=STRATEGY,
+                run_mode=RUN_MODE,
+                stage_name="extract_validate_land_delta",
+                stage_payload=extract_stage_payload,
             )
         finally:
             release_pipeline_lock(

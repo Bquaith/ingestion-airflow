@@ -14,6 +14,7 @@ from ingestion_airflow.db.audit_tables import (
     pipeline_state_table,
     run_audit_table,
     stage_audit_table,
+    validation_error_audit_table,
 )
 
 
@@ -157,6 +158,32 @@ def read_stage_audit_metrics(engine: Engine, run_id: str, stage_name: str) -> di
     return dict(row["metrics_json"] or {})
 
 
+def read_stage_audit_record(engine: Engine, run_id: str, stage_name: str) -> dict[str, Any] | None:
+    statement = select(
+        stage_audit_table.c.status,
+        stage_audit_table.c.metrics_json,
+        stage_audit_table.c.error_text,
+        stage_audit_table.c.started_at,
+        stage_audit_table.c.finished_at,
+    ).where(
+        stage_audit_table.c.run_id == _parse_run_id(run_id),
+        stage_audit_table.c.stage_name == stage_name,
+    )
+
+    with engine.begin() as conn:
+        row = conn.execute(statement).mappings().first()
+        if row is None:
+            return None
+
+    return {
+        "status": row["status"],
+        "metrics_json": dict(row["metrics_json"] or {}),
+        "error_text": row["error_text"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+    }
+
+
 def start_stage_audit(engine: Engine, run_id: str, stage_name: str) -> None:
     now = datetime.now(timezone.utc)
     statement = (
@@ -244,6 +271,53 @@ def finish_run_audit(
         conn.execute(statement)
 
 
+def replace_validation_errors_for_stage(
+    engine: Engine,
+    run_id: str,
+    pipeline_id: str,
+    strategy: str,
+    run_mode: str,
+    stage_name: str,
+    error_object_key: str | None,
+    error_rows: list[Mapping[str, Any]],
+) -> int:
+    run_uuid = _parse_run_id(run_id)
+
+    normalized_rows: list[dict[str, Any]] = []
+    for error in error_rows:
+        details_json = dict(error)
+        normalized_rows.append(
+            {
+                "error_id": uuid.uuid4(),
+                "run_id": run_uuid,
+                "pipeline_id": pipeline_id,
+                "strategy": strategy,
+                "run_mode": run_mode,
+                "stage_name": stage_name,
+                "row_number": _coerce_optional_int(error.get("row_number")),
+                "field": str(error.get("field") or "$"),
+                "code": str(error.get("code") or "validation_error"),
+                "message": str(error.get("message") or "validation error"),
+                "constraint": _coerce_optional_text(error.get("constraint")),
+                "actual_value": _coerce_optional_text(error.get("actual_value")),
+                "error_object_key": _coerce_optional_text(error_object_key),
+                "details_json": details_json,
+            }
+        )
+
+    delete_statement = delete(validation_error_audit_table).where(
+        validation_error_audit_table.c.run_id == run_uuid,
+        validation_error_audit_table.c.stage_name == stage_name,
+    )
+
+    with engine.begin() as conn:
+        conn.execute(delete_statement)
+        if normalized_rows:
+            conn.execute(insert(validation_error_audit_table), normalized_rows)
+
+    return len(normalized_rows)
+
+
 def finalize_pipeline_state(engine: Engine, pipeline_id: str) -> None:
     latest_statement = (
         select(
@@ -290,3 +364,19 @@ def finalize_pipeline_state(engine: Engine, pipeline_id: str) -> None:
             },
         )
         conn.execute(upsert_statement)
+
+
+def _coerce_optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

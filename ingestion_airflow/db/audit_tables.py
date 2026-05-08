@@ -76,6 +76,27 @@ pipeline_checkpoint_table = Table(
     schema=AUDIT_SCHEMA,
 )
 
+validation_error_audit_table = Table(
+    "validation_error_audit",
+    audit_metadata,
+    Column("error_id", PGUUID(as_uuid=True), primary_key=True),
+    Column("run_id", PGUUID(as_uuid=True), nullable=False, index=True),
+    Column("pipeline_id", Text, nullable=False, index=True),
+    Column("strategy", Text, nullable=False),
+    Column("run_mode", Text, nullable=False, server_default=text("'ingest'")),
+    Column("stage_name", Text, nullable=False, index=True),
+    Column("row_number", Integer),
+    Column("field", Text, nullable=False),
+    Column("code", Text, nullable=False),
+    Column("message", Text, nullable=False),
+    Column("constraint", Text),
+    Column("actual_value", Text),
+    Column("error_object_key", Text),
+    Column("details_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    schema=AUDIT_SCHEMA,
+)
+
 
 def ensure_audit_tables(engine: Engine) -> None:
     with engine.begin() as conn:

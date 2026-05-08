@@ -17,6 +17,7 @@ from ingestion_airflow.db.audit import (
     finish_stage_audit,
     persist_pipeline_checkpoint,
     read_pipeline_checkpoint,
+    read_stage_audit_record,
     release_pipeline_lock,
     start_run_audit,
     start_stage_audit,
@@ -33,6 +34,10 @@ from ingestion_airflow.runtime import (
     build_object_store_config,
 )
 from ingestion_airflow.task_runtime import get_missing_return_value_tasks
+from ingestion_airflow.validation_error_audit import (
+    extract_validation_error_context,
+    persist_validation_errors_from_artifact,
+)
 from ingestion_core.adapters.postgres import create_sqlalchemy_engine
 from ingestion_core.contracts import ContractDefinition, ContractRegistryClient
 from ingestion_core.strategies.hash_diff import (
@@ -132,6 +137,7 @@ def ingest_contract_hashdiff() -> None:
                     "status": "failed",
                     "exception_class": exc.__class__.__name__,
                     "error_message": str(exc),
+                    **extract_validation_error_context(exc),
                 },
                 strategy=STRATEGY,
                 run_mode=RUN_MODE,
@@ -365,6 +371,8 @@ def ingest_contract_hashdiff() -> None:
         merge_result = task_instance.xcom_pull(task_ids="merge_curated") or {}
         accepted_result = task_instance.xcom_pull(task_ids="extract_validate_land") or {}
         checkpoint_result = task_instance.xcom_pull(task_ids="persist_checkpoint_task") or {}
+        extract_stage_record = read_stage_audit_record(audit_engine, str(run_context["run_id"]), "extract_validate_land")
+        extract_stage_payload = accepted_result or dict((extract_stage_record or {}).get("metrics_json") or {})
 
         try:
             if failed_tasks:
@@ -372,7 +380,7 @@ def ingest_contract_hashdiff() -> None:
                     engine=audit_engine,
                     run_id=str(run_context["run_id"]),
                     status="failed",
-                    read_count=int(accepted_result.get("source_row_count", 0) or 0),
+                    read_count=int(extract_stage_payload.get("source_row_count", 0) or 0),
                     insert_count=int(merge_result.get("insert_count", 0) or 0),
                     update_count=int(merge_result.get("update_count", 0) or 0),
                     delete_count=int(merge_result.get("delete_count", 0) or 0),
@@ -381,8 +389,11 @@ def ingest_contract_hashdiff() -> None:
                         payload={
                             "failed_tasks": failed_tasks,
                             "checkpoint_persisted": bool(checkpoint_result),
-                            "accepted_object_key": accepted_result.get("accepted_object_key"),
-                            "validation_error_object_key": accepted_result.get("error_object_key"),
+                            "accepted_object_key": extract_stage_payload.get("accepted_object_key"),
+                            "validation_error_object_key": (
+                                extract_stage_payload.get("validation_error_object_key")
+                                or extract_stage_payload.get("error_object_key")
+                            ),
                         },
                         strategy=STRATEGY,
                         run_mode=RUN_MODE,
@@ -392,15 +403,31 @@ def ingest_contract_hashdiff() -> None:
                     ),
                     error_text=f"Pipeline failed at stages: {', '.join(failed_tasks)}",
                 )
+                persist_validation_errors_from_artifact(
+                    engine=audit_engine,
+                    object_store_config=build_object_store_config(config),
+                    run_id=str(run_context["run_id"]),
+                    pipeline_id=config.pipeline_id,
+                    strategy=STRATEGY,
+                    run_mode=RUN_MODE,
+                    stage_name="extract_validate_land",
+                    stage_payload=extract_stage_payload,
+                )
                 raise AirflowFailException(f"Pipeline failed at tasks: {', '.join(failed_tasks)}")
             else:
                 run_metrics = enrich_metrics_payload(
                     payload={
                         **merge_result,
                         "checkpoint_persisted": bool(checkpoint_result),
-                        "accepted_object_key": accepted_result.get("accepted_object_key"),
-                        "validation_error_object_key": accepted_result.get("error_object_key"),
-                        "validation_manifest_key": accepted_result.get("manifest_key"),
+                        "accepted_object_key": extract_stage_payload.get("accepted_object_key"),
+                        "validation_error_object_key": (
+                            extract_stage_payload.get("validation_error_object_key")
+                            or extract_stage_payload.get("error_object_key")
+                        ),
+                        "validation_manifest_key": (
+                            extract_stage_payload.get("validation_manifest_key")
+                            or extract_stage_payload.get("manifest_key")
+                        ),
                     },
                     strategy=STRATEGY,
                     run_mode=RUN_MODE,
@@ -420,6 +447,16 @@ def ingest_contract_hashdiff() -> None:
                     metrics_json=run_metrics,
                     error_text=None,
                 )
+            persist_validation_errors_from_artifact(
+                engine=audit_engine,
+                object_store_config=build_object_store_config(config),
+                run_id=str(run_context["run_id"]),
+                pipeline_id=config.pipeline_id,
+                strategy=STRATEGY,
+                run_mode=RUN_MODE,
+                stage_name="extract_validate_land",
+                stage_payload=extract_stage_payload,
+            )
         finally:
             release_pipeline_lock(
                 engine=audit_engine,
